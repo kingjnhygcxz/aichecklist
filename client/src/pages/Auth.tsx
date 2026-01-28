@@ -19,7 +19,7 @@ const DownloadCounter = React.lazy(() => import('@/components/stats/DownloadCoun
 import { TermsOfService } from '@/components/legal/TermsOfService';
 import { Checkbox } from '@/components/ui/checkbox';
 import Logo from '@/components/Logo';
-import aidomoLogo from '@assets/icon_gold_small.png';
+const aidomoLogo = "/assets/icon_gold_small.png";
 import { useQuery } from '@tanstack/react-query';
 
 interface StripePrice {
