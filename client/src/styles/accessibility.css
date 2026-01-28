@@ -1,0 +1,157 @@
+/* Accessibility Enhancement Styles */
+
+/* High Contrast Mode */
+.accessibility-high-contrast {
+  --background: 0 0% 100%;
+  --foreground: 0 0% 0%;
+  --card: 0 0% 100%;
+  --card-foreground: 0 0% 0%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 0 0% 0%;
+  --primary: 0 0% 0%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 0 0% 90%;
+  --secondary-foreground: 0 0% 0%;
+  --muted: 0 0% 90%;
+  --muted-foreground: 0 0% 20%;
+  --accent: 0 0% 90%;
+  --accent-foreground: 0 0% 0%;
+  --destructive: 0 84% 60%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 0 0% 20%;
+  --input: 0 0% 90%;
+  --ring: 0 0% 0%;
+}
+
+.accessibility-high-contrast .dark {
+  --background: 0 0% 0%;
+  --foreground: 0 0% 100%;
+  --card: 0 0% 0%;
+  --card-foreground: 0 0% 100%;
+  --popover: 0 0% 0%;
+  --popover-foreground: 0 0% 100%;
+  --primary: 0 0% 100%;
+  --primary-foreground: 0 0% 0%;
+  --secondary: 0 0% 10%;
+  --secondary-foreground: 0 0% 100%;
+  --muted: 0 0% 10%;
+  --muted-foreground: 0 0% 80%;
+  --accent: 0 0% 10%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 84% 60%;
+  --destructive-foreground: 0 0% 0%;
+  --border: 0 0% 80%;
+  --input: 0 0% 10%;
+  --ring: 0 0% 100%;
+}
+
+/* Large Text Mode */
+.accessibility-large-text {
+  font-size: 1.125rem; /* 18px base instead of 16px */
+}
+
+.accessibility-large-text h1 {
+  font-size: 3rem; /* 48px instead of 2.25rem */
+}
+
+.accessibility-large-text h2 {
+  font-size: 2.5rem; /* 40px instead of 1.875rem */
+}
+
+.accessibility-large-text h3 {
+  font-size: 2rem; /* 32px instead of 1.5rem */
+}
+
+.accessibility-large-text h4 {
+  font-size: 1.5rem; /* 24px instead of 1.25rem */
+}
+
+.accessibility-large-text .text-sm {
+  font-size: 1rem; /* 16px instead of 0.875rem */
+}
+
+.accessibility-large-text .text-xs {
+  font-size: 0.875rem; /* 14px instead of 0.75rem */
+}
+
+/* Reduced Motion */
+.accessibility-reduced-motion *,
+.accessibility-reduced-motion *:before,
+.accessibility-reduced-motion *:after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+
+/* Screen Reader Mode */
+.accessibility-screen-reader .sr-only {
+  position: static !important;
+  width: auto !important;
+  height: auto !important;
+  padding: 0.25rem !important;
+  margin: 0 !important;
+  overflow: visible !important;
+  clip: auto !important;
+  white-space: normal !important;
+  background-color: var(--background) !important;
+  color: var(--foreground) !important;
+  border: 1px solid var(--border) !important;
+}
+
+.accessibility-screen-reader {
+  /* Ensure all interactive elements are clearly marked */
+}
+
+.accessibility-screen-reader button,
+.accessibility-screen-reader a,
+.accessibility-screen-reader input,
+.accessibility-screen-reader select,
+.accessibility-screen-reader textarea {
+  outline: 2px solid var(--ring) !important;
+  outline-offset: 2px !important;
+}
+
+/* Enhanced Focus Indicators */
+.accessibility-screen-reader *:focus {
+  outline: 3px solid var(--ring) !important;
+  outline-offset: 2px !important;
+  box-shadow: 0 0 0 5px rgba(59, 130, 246, 0.3) !important;
+}
+
+/* Skip Links for Screen Reader Navigation */
+.skip-link {
+  position: absolute;
+  top: -40px;
+  left: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  padding: 8px;
+  text-decoration: none;
+  border: 2px solid var(--border);
+  border-radius: 4px;
+  z-index: 1000;
+}
+
+.skip-link:focus {
+  top: 6px;
+}
+
+/* High contrast buttons and interactive elements */
+.accessibility-high-contrast button {
+  border: 2px solid var(--border) !important;
+}
+
+.accessibility-high-contrast input,
+.accessibility-high-contrast select,
+.accessibility-high-contrast textarea {
+  border: 2px solid var(--border) !important;
+  background-color: var(--background) !important;
+  color: var(--foreground) !important;
+}
+
+/* Ensure adequate color contrast for all text */
+.accessibility-high-contrast .text-muted-foreground {
+  color: hsl(var(--foreground)) !important;
+  opacity: 0.8 !important;
+}

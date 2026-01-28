@@ -1,0 +1,48 @@
+node_modules
+dist
+.DS_Store
+server/public
+vite.config.ts.*
+*.tar.gz
+
+# Backup directories - exclude from version control and deployments
+backups/
+*.zip
+*.sql
+# ---- keep repo clean (Railway/GitHub) ----
+node_modules/
+dist/
+build/
+logs/
+backups/
+diagnostics/
+attached_assets/
+
+# archives / backups
+*.zip
+*.tar.gz
+
+# secrets
+.env
+.env.*
+node_modules/
+dist/
+build/
+.next/
+.cache/
+.npm/
+.yarn/
+.pnpm-store/
+.nix/
+.DS_Store
+
+# big media + recordings
+attached_assets/**/*.mp4
+attached_assets/**/*.mov
+attached_assets/**/*.mkv
+
+# big backups / zips / blobs
+*.zip
+zi*
+backups/
+cpanel_deployment_package/

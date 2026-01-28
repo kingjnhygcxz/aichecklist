@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AIDomo Settings</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    
+    body {
+      width: 320px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      color: #1a1a1a;
+      background: #fff;
+    }
+    
+    .popup-container {
+      padding: 16px;
+    }
+    
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid #eee;
+    }
+    
+    .logo {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #1a1a1a 0%, #333 100%);
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: 600;
+    }
+    
+    .title-section h1 {
+      font-size: 16px;
+      font-weight: 600;
+    }
+    
+    .title-section p {
+      font-size: 12px;
+      color: #666;
+    }
+    
+    .status-card {
+      padding: 12px;
+      border-radius: 10px;
+      margin-bottom: 16px;
+    }
+    
+    .status-card.connected {
+      background: #dcfce7;
+      border: 1px solid #bbf7d0;
+    }
+    
+    .status-card.disconnected {
+      background: #fee2e2;
+      border: 1px solid #fecaca;
+    }
+    
+    .status-card.checking {
+      background: #f5f5f5;
+      border: 1px solid #e5e5e5;
+    }
+    
+    .status-title {
+      font-weight: 600;
+      font-size: 13px;
+      margin-bottom: 4px;
+    }
+    
+    .status-card.connected .status-title { color: #166534; }
+    .status-card.disconnected .status-title { color: #991b1b; }
+    
+    .status-message {
+      font-size: 12px;
+      color: #666;
+    }
+    
+    .section {
+      margin-bottom: 16px;
+    }
+    
+    .section-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: #666;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+    }
+    
+    .setting-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 0;
+    }
+    
+    .setting-label {
+      font-size: 13px;
+    }
+    
+    .setting-input {
+      padding: 6px 10px;
+      font-size: 13px;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      width: 140px;
+    }
+    
+    .toggle {
+      position: relative;
+      width: 44px;
+      height: 24px;
+      background: #ccc;
+      border-radius: 12px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    
+    .toggle.active {
+      background: #1a1a1a;
+    }
+    
+    .toggle::after {
+      content: '';
+      position: absolute;
+      width: 20px;
+      height: 20px;
+      background: white;
+      border-radius: 50%;
+      top: 2px;
+      left: 2px;
+      transition: transform 0.2s;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+    }
+    
+    .toggle.active::after {
+      transform: translateX(20px);
+    }
+    
+    .btn {
+      width: 100%;
+      padding: 10px;
+      font-size: 13px;
+      font-weight: 500;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    
+    .btn-primary {
+      background: #1a1a1a;
+      color: white;
+    }
+    
+    .btn-primary:hover {
+      background: #333;
+    }
+    
+    .btn-secondary {
+      background: #f5f5f5;
+      color: #333;
+      border: 1px solid #ddd;
+    }
+    
+    .btn-secondary:hover {
+      background: #eee;
+    }
+    
+    .btn-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    
+    .shortcut-hint {
+      text-align: center;
+      font-size: 12px;
+      color: #888;
+      margin-top: 12px;
+    }
+    
+    .shortcut-hint kbd {
+      display: inline-block;
+      padding: 2px 6px;
+      font-size: 11px;
+      font-weight: 600;
+      background: #f0f0f0;
+      border-radius: 4px;
+      border: 1px solid #ddd;
+    }
+  </style>
+</head>
+<body>
+  <div class="popup-container">
+    <div class="header">
+      <div class="logo">AD</div>
+      <div class="title-section">
+        <h1>AIDomo</h1>
+        <p>Voice Assistant for AIChecklist</p>
+      </div>
+    </div>
+    
+    <div class="status-card checking" id="status-card">
+      <div class="status-title">Checking connection...</div>
+      <div class="status-message" id="status-message">Connecting to AIChecklist.io</div>
+    </div>
+    
+    <div class="section">
+      <div class="section-title">Settings</div>
+      
+      <div class="setting-row">
+        <span class="setting-label">Wake Phrase</span>
+        <input type="text" class="setting-input" id="wake-phrase" value="hey aidomo">
+      </div>
+      
+      <div class="setting-row">
+        <span class="setting-label">Show Waveform</span>
+        <div class="toggle active" id="toggle-waveform"></div>
+      </div>
+    </div>
+    
+    <div class="section">
+      <div class="section-title">Quick Actions</div>
+      <div class="btn-group">
+        <button class="btn btn-primary" id="btn-open">Open Voice Bar</button>
+        <a href="https://aichecklist.io" target="_blank" class="btn btn-secondary" style="text-align: center; text-decoration: none;">Open AIChecklist.io</a>
+      </div>
+    </div>
+    
+    <div class="shortcut-hint">
+      Press <kbd>⌘K</kbd> or <kbd>Ctrl+K</kbd> to open voice bar
+    </div>
+  </div>
+  
+  <script src="popup.js"></script>
+</body>
+</html>

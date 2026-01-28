@@ -1,0 +1,63 @@
+/* Super Powers Focus Filter Styles */
+
+/* When focus filter is enabled, dim and blur non-essential elements */
+.focus-filter-enabled .bg-card:not(.task-input-container):not(.task-item-active):not(.focus-timer-container) {
+  opacity: 0.3;
+  filter: blur(1px);
+  transition: all 0.3s ease;
+}
+
+/* Keep these elements fully visible during focus mode */
+.focus-filter-enabled .task-item-active,
+.focus-filter-enabled .task-input-container,
+.focus-filter-enabled .focus-timer-container,
+.focus-filter-enabled .main-timer-wrapper {
+  opacity: 1 !important;
+  filter: none !important;
+  position: relative;
+  z-index: 10;
+}
+
+/* Add a subtle overlay to the entire page when focus filter is active */
+.focus-filter-enabled::after {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.15);
+  pointer-events: none;
+  z-index: 5;
+  animation: fadeIn 0.3s ease;
+}
+
+/* Keep header and important controls visible but dimmed */
+.focus-filter-enabled header {
+  opacity: 0.7;
+  transition: opacity 0.3s ease;
+}
+
+.focus-filter-enabled header:hover {
+  opacity: 1;
+}
+
+/* Animation for the overlay */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Custom background color transitions */
+:root {
+  transition: background-color 0.3s ease;
+}
+
+/* Apply custom background colors to the main body */
+body {
+  transition: background-color 0.3s ease;
+}

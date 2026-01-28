@@ -1,0 +1,127 @@
+{
+  "project": "90-Day Advanced SEO Plan for aichecklist.io",
+  "timeline": [
+    {
+      "phase": "Week 1-2",
+      "focus": "Technical SEO Foundation",
+      "priority": "critical",
+      "tasks": [
+        "Run Lighthouse and GTmetrix scans",
+        "Fix Performance, Accessibility, SEO, Best Practices issues",
+        "Enforce HTTPS sitewide",
+        "Generate and submit XML sitemap and robots.txt",
+        "Enable server-side rendering or prerendering for dynamic content"
+      ],
+      "deliverables": [
+        "Lighthouse score >90",
+        "Core Web Vitals optimized",
+        "XML sitemap live",
+        "robots.txt configured"
+      ]
+    },
+    {
+      "phase": "Week 3-4",
+      "focus": "Schema & Structured Data",
+      "priority": "high",
+      "tasks": [
+        "Implement JSON-LD Organization schema",
+        "Add FAQ schema for checklist Q&A pages",
+        "Add HowTo schema for step-by-step content",
+        "Validate schema using Google Rich Results Test"
+      ],
+      "deliverables": [
+        "Organization schema live",
+        "FAQ schema implemented",
+        "HowTo schema for templates",
+        "Rich snippets appearing"
+      ]
+    },
+    {
+      "phase": "Week 5-6",
+      "focus": "Content SEO & Keyword Entities",
+      "priority": "high",
+      "tasks": [
+        "Cluster keywords by semantic meaning (using NLP embeddings)",
+        "Create or optimize long-form content for each cluster",
+        "Add AI-generated alt text to all images",
+        "Ensure entity-based SEO by linking to Google Knowledge Graph entities"
+      ],
+      "deliverables": [
+        "Keyword clusters mapped",
+        "Long-form content created",
+        "Image alt text optimized",
+        "Entity optimization complete"
+      ]
+    },
+    {
+      "phase": "Week 7-8",
+      "focus": "Internal Linking & Site Architecture",
+      "priority": "medium",
+      "tasks": [
+        "Scan site for orphan pages",
+        "Add contextual links between related checklist pages",
+        "Ensure anchor text uses semantically varied, relevant wording",
+        "Create topic clusters with pillar pages"
+      ],
+      "deliverables": [
+        "Internal linking audit",
+        "Contextual links added",
+        "Topic clusters created",
+        "Site architecture optimized"
+      ]
+    },
+    {
+      "phase": "Week 9-10",
+      "focus": "Authority & Trust (E-E-A-T)",
+      "priority": "high",
+      "tasks": [
+        "Add author bios with credentials and LinkedIn profiles",
+        "Cite 3–5 authoritative external sources per article",
+        "Add testimonials, case studies, and trust badges to homepage",
+        "Register a Google Business Profile for aichecklist.io"
+      ],
+      "deliverables": [
+        "Author profiles created",
+        "Authority links added",
+        "Trust signals implemented",
+        "Google Business Profile live"
+      ]
+    },
+    {
+      "phase": "Week 11-12",
+      "focus": "Analytics & Performance Monitoring",
+      "priority": "high",
+      "tasks": [
+        "Install Google Analytics 4 and connect to BigQuery",
+        "Track events: checklist view, download, signup, CTA clicks",
+        "Set up Search Console and monitor rankings",
+        "Generate weekly SEO performance reports"
+      ],
+      "deliverables": [
+        "GA4 tracking active",
+        "Event tracking configured",
+        "Search Console connected",
+        "Reporting dashboard live"
+      ]
+    }
+  ],
+  "kpis": {
+    "organic_traffic": "Increase by 150% in 90 days",
+    "keyword_rankings": "Top 10 for 25+ target keywords",
+    "core_web_vitals": "All green scores",
+    "click_through_rate": "Improve by 40%",
+    "conversion_rate": "Increase by 25%"
+  },
+  "target_keywords": [
+    "AI checklist",
+    "task management app",
+    "productivity templates",
+    "project checklist",
+    "business checklist",
+    "startup checklist",
+    "team collaboration tools",
+    "voice authentication",
+    "smart calendar integration",
+    "AIDOMO AI assistant"
+  ]
+}

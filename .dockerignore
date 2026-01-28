@@ -1,0 +1,65 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Node modules (rebuilt in Docker)
+node_modules
+**/node_modules
+
+# Nix (critical - prevents 8GB+ images)
+.nix*
+nix
+/nix
+result
+replit.nix
+**/.nix*
+
+# Build outputs (rebuilt in Docker)
+dist
+.next
+out
+build
+
+# Development/IDE
+.env
+.env.*
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker files
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Documentation
+*.md
+docs
+
+# Logs and caches
+logs
+*.log
+.cache
+**/.cache
+**/.turbo
+**/coverage
+.nyc_output
+tmp
+temp
+
+# Replit specific
+.replit
+.upm
+.config
+.local
+
+# Backups
+*.zip
+backup_*

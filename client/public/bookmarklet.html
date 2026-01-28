@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AIDomo Bookmarklet - AIChecklist.io</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #1a1a1a 0%, #333 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .container {
+      background: white;
+      border-radius: 20px;
+      padding: 40px;
+      max-width: 500px;
+      text-align: center;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    }
+    .logo {
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #1a1a1a 0%, #333 100%);
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+      font-weight: 700;
+      margin: 0 auto 20px;
+    }
+    h1 { font-size: 28px; margin-bottom: 10px; color: #1a1a1a; }
+    p { color: #666; margin-bottom: 30px; line-height: 1.6; }
+    .bookmarklet {
+      display: inline-block;
+      padding: 16px 32px;
+      background: linear-gradient(135deg, #1a1a1a 0%, #333 100%);
+      color: white !important;
+      text-decoration: none;
+      border-radius: 12px;
+      font-size: 18px;
+      font-weight: 600;
+      cursor: grab;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .bookmarklet:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+    }
+    .instructions {
+      margin-top: 30px;
+      padding: 20px;
+      background: #f5f5f5;
+      border-radius: 12px;
+      text-align: left;
+    }
+    .instructions h3 { margin-bottom: 12px; color: #1a1a1a; }
+    .instructions ol { padding-left: 20px; color: #555; }
+    .instructions li { margin-bottom: 10px; line-height: 1.5; }
+    .back-link {
+      display: inline-block;
+      margin-top: 20px;
+      color: #666;
+      text-decoration: none;
+    }
+    .back-link:hover { color: #1a1a1a; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="logo">AD</div>
+    <h1>AIDomo Bookmarklet</h1>
+    <p>Add AIDomo to any webpage with one click. No extension needed!</p>
+    
+    <a class="bookmarklet" href="javascript:void(function(){var s=document.createElement('script');s.src='https://aichecklist.io/aidomo-loader.js';document.body.appendChild(s);})();">
+      🎤 AIDomo
+    </a>
+    
+    <div class="instructions">
+      <h3>How to Install:</h3>
+      <ol>
+        <li><strong>Show your bookmarks bar</strong><br>Press Ctrl+Shift+B (Windows) or Cmd+Shift+B (Mac)</li>
+        <li><strong>Drag the button above</strong> to your bookmarks bar</li>
+        <li><strong>Visit any webpage</strong> and click the AIDomo bookmark</li>
+        <li><strong>Type your command</strong> and press Enter!</li>
+      </ol>
+    </div>
+    
+    <a href="/" class="back-link">← Back to AIChecklist.io</a>
+  </div>
+</body>
+</html>

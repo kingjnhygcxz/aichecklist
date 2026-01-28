@@ -1,0 +1,59 @@
+🚨 URGENT - VITE DEPLOYMENT ERROR FIX
+=====================================
+
+YOUR ISSUE: You're running DEVELOPMENT mode on PRODUCTION server!
+The Vite error means you're using "npm run dev" instead of "npm start"
+
+IMMEDIATE FIX - RUN THESE COMMANDS IN ORDER:
+===========================================
+
+1. STOP the current server process (Ctrl+C)
+
+2. DELETE development files:
+   rm -rf node_modules
+   rm -rf dist
+
+3. REINSTALL everything:
+   npm install
+
+4. BUILD for production:
+   npm run build
+   
+   ⚠️  This step is CRITICAL - it creates dist/index.js
+
+5. START production server:
+   npm start
+   
+   ⚠️  NOT "npm run dev" - that's development only!
+
+VERIFY IT WORKS:
+===============
+- Server should start without Vite errors
+- Visit: http://your-domain.com/api/health
+- Should return JSON with status: "healthy"
+
+WHAT WAS WRONG:
+==============
+❌ You were running: npm run dev (development)
+✅ You should run: npm start (production)
+
+The error "Cannot find module vite/dist/node/chunks/dep-UEPspf5j.js" 
+happens because Vite development files don't exist in production!
+
+ENVIRONMENT CHECK:
+=================
+Make sure these environment variables are set:
+- NODE_ENV=production
+- DATABASE_URL=your_postgresql_url
+- OPENAI_API_KEY=your_openai_key
+- RESEND_API_KEY=your_resend_key
+- FROM_EMAIL=your_email
+
+If you're STILL getting errors after this:
+==========================================
+1. Check your process manager (PM2, systemd, etc.)
+2. Make sure it's running "npm start" NOT "npm run dev"
+3. Check that dist/index.js exists after "npm run build"
+4. Restart your web server (nginx/apache) if needed
+
+CONTACT US if this doesn't work - but follow these steps EXACTLY first!

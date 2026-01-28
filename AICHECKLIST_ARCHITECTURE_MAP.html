@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AIChecklist.io - Critical File Architecture Map</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            color: #ffffff;
+            overflow-x: auto;
+            min-height: 100vh;
+        }
+        
+        .header {
+            text-align: center;
+            padding: 20px;
+            background: rgba(0, 0, 0, 0.3);
+            border-bottom: 2px solid #00ff88;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            color: #00ff88;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            font-size: 1.2em;
+            color: #cccccc;
+        }
+        
+        .architecture-container {
+            display: flex;
+            flex-wrap: wrap;
+            padding: 20px;
+            gap: 20px;
+            justify-content: center;
+            min-width: 1200px;
+        }
+        
+        .layer {
+            background: rgba(255, 255, 255, 0.05);
+            border: 2px solid #00ff88;
+            border-radius: 15px;
+            padding: 20px;
+            margin: 10px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0, 255, 136, 0.1);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+            min-width: 300px;
+        }
+        
+        .layer:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 12px 40px rgba(0, 255, 136, 0.2);
+        }
+        
+        .layer h2 {
+            color: #00ff88;
+            font-size: 1.5em;
+            margin-bottom: 15px;
+            border-bottom: 2px solid #00ff88;
+            padding-bottom: 8px;
+        }
+        
+        .file-group {
+            margin-bottom: 20px;
+        }
+        
+        .file-group h3 {
+            color: #ffaa00;
+            font-size: 1.2em;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+        }
+        
+        .file-group h3::before {
+            content: "📁";
+            margin-right: 8px;
+        }
+        
+        .file-item {
+            background: rgba(255, 255, 255, 0.08);
+            padding: 10px;
+            margin: 5px 0;
+            border-radius: 8px;
+            border-left: 4px solid #00ff88;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            position: relative;
+        }
+        
+        .file-item:hover {
+            background: rgba(0, 255, 136, 0.1);
+            transform: translateX(5px);
+        }
+        
+        .file-name {
+            font-weight: bold;
+            color: #ffffff;
+            margin-bottom: 5px;
+        }
+        
+        .file-desc {
+            font-size: 0.9em;
+            color: #cccccc;
+            line-height: 1.4;
+        }
+        
+        .connection-line {
+            position: absolute;
+            background: #00ff88;
+            height: 2px;
+            z-index: -1;
+            opacity: 0.6;
+        }
+        
+        .data-flow {
+            background: linear-gradient(90deg, #00ff88, #ffaa00);
+            padding: 20px;
+            border-radius: 15px;
+            margin: 20px;
+            text-align: center;
+        }
+        
+        .flow-step {
+            display: inline-block;
+            background: rgba(0, 0, 0, 0.3);
+            padding: 10px 15px;
+            margin: 5px;
+            border-radius: 8px;
+            border: 1px solid #ffffff;
+        }
+        
+        .critical-indicator {
+            position: absolute;
+            top: -5px;
+            right: -5px;
+            background: #ff4444;
+            color: white;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            font-size: 0.8em;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .ai-service {
+            border-left-color: #ff6b6b !important;
+        }
+        
+        .database-item {
+            border-left-color: #4ecdc4 !important;
+        }
+        
+        .auth-item {
+            border-left-color: #ffe66d !important;
+        }
+        
+        .legend {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            padding: 20px;
+            background: rgba(0, 0, 0, 0.3);
+            margin: 20px;
+            border-radius: 10px;
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .legend-color {
+            width: 20px;
+            height: 4px;
+            border-radius: 2px;
+        }
+        
+        .stats {
+            background: rgba(0, 255, 136, 0.1);
+            padding: 20px;
+            margin: 20px;
+            border-radius: 10px;
+            text-align: center;
+        }
+        
+        .stats h3 {
+            color: #00ff88;
+            margin-bottom: 15px;
+        }
+        
+        .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+        }
+        
+        .stat-item {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 15px;
+            border-radius: 8px;
+        }
+        
+        .stat-number {
+            font-size: 2em;
+            font-weight: bold;
+            color: #00ff88;
+        }
+        
+        .stat-label {
+            color: #cccccc;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🚀 AIChecklist.io Architecture Map</h1>
+        <p>Complete Visual System Overview - All Critical Files & Data Flow</p>
+    </div>
+
+    <div class="stats">
+        <h3>📊 System Statistics</h3>
+        <div class="stat-grid">
+            <div class="stat-item">
+                <div class="stat-number">45+</div>
+                <div class="stat-label">Core Components</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-number">20+</div>
+                <div class="stat-label">React Hooks</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-number">15+</div>
+                <div class="stat-label">API Routes</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-number">12+</div>
+                <div class="stat-label">Database Tables</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-number">3</div>
+                <div class="stat-label">AI Services</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="data-flow">
+        <h2>🔄 Data Flow Sequence</h2>
+        <div class="flow-step">1. Frontend Request</div>
+        <div class="flow-step">→</div>
+        <div class="flow-step">2. API Routes</div>
+        <div class="flow-step">→</div>
+        <div class="flow-step">3. Database/AI</div>
+        <div class="flow-step">→</div>
+        <div class="flow-step">4. Response</div>
+        <div class="flow-step">→</div>
+        <div class="flow-step">5. UI Update</div>
+    </div>
+
+    <div class="architecture-container">
+        <!-- Frontend Layer -->
+        <div class="layer">
+            <h2>🎨 Frontend Architecture</h2>
+            
+            <div class="file-group">
+                <h3>Core Pages</h3>
+                <div class="file-item">
+                    <div class="critical-indicator">!</div>
+                    <div class="file-name">pages/Home.tsx</div>
+                    <div class="file-desc">Main dashboard with task management, timer, and AI suggestions</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">pages/Auth.tsx</div>
+                    <div class="file-desc">Authentication with voice biometrics and multi-factor support</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">pages/Calendar.tsx</div>
+                    <div class="file-desc">Task scheduling and calendar management interface</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">pages/Admin.tsx</div>
+                    <div class="file-desc">Administrative controls and user management</div>
+                </div>
+            </div>
+
+            <div class="file-group">
+                <h3>Critical Components</h3>
+                <div class="file-item">
+                    <div class="critical-indicator">!</div>
+                    <div class="file-name">components/task/TaskInput.tsx</div>
+                    <div class="file-desc">Main task creation with AI suggestions and auto-submit</div>
+                </div>
+                <div class="file-item">
+                    <div class="critical-indicator">!</div>
+                    <div class="file-name">components/task/TaskList.tsx</div>
+                    <div class="file-desc">Drag-and-drop task management with completion tracking</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">components/domoai/DomoAI.tsx</div>
+                    <div class="file-desc">AIDOMO AI assistant with memory and personalization</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">components/timer/MainTimer.tsx</div>
+                    <div class="file-desc">Pomodoro timer with background operation and alarms</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">components/notifications/NotificationBell.tsx</div>
+                    <div class="file-desc">Real-time notifications with double-tap dismiss</div>
+                </div>
+            </div>
+
+            <div class="file-group">
+                <h3>Authentication & Security</h3>
+                <div class="file-item auth-item">
+                    <div class="file-name">components/auth/EnhancedVoiceBiometric.tsx</div>
+                    <div class="file-desc">Voice recognition authentication with adaptive learning</div>
+                </div>
+                <div class="file-item auth-item">
+                    <div class="file-name">components/auth/MFAChallenge.tsx</div>
+                    <div class="file-desc">Multi-factor authentication challenges</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Hooks & State Management -->
+        <div class="layer">
+            <h2>🪝 Hooks & State Management</h2>
+            
+            <div class="file-group">
+                <h3>Core Business Logic</h3>
+                <div class="file-item">
+                    <div class="critical-indicator">!</div>
+                    <div class="file-name">hooks/useTaskManager.ts</div>
+                    <div class="file-desc">Complete task CRUD operations, drag-drop, archiving</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">hooks/useAIAssistant.ts</div>
+                    <div class="file-desc">AI-powered task suggestions and insights</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">hooks/useAuth.ts</div>
+                    <div class="file-desc">Authentication state and session management</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">hooks/useTimer.ts</div>
+                    <div class="file-desc">Timer functionality with background operation</div>
+                </div>
+            </div>
+
+            <div class="file-group">
+                <h3>User Experience</h3>
+                <div class="file-item">
+                    <div class="file-name">hooks/useAchievements.ts</div>
+                    <div class="file-desc">Gamification system with progress tracking</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">hooks/useUserPreferences.ts</div>
+                    <div class="file-desc">User settings, themes, and customization</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">hooks/useVoiceCommands.ts</div>
+                    <div class="file-desc">Voice command processing and speech recognition</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Backend Layer -->
+        <div class="layer">
+            <h2>⚡ Backend Services</h2>
+            
+            <div class="file-group">
+                <h3>Core API Routes</h3>
+                <div class="file-item">
+                    <div class="critical-indicator">!</div>
+                    <div class="file-name">server/routes.ts</div>
+                    <div class="file-desc">Main API endpoints for tasks, users, auth, achievements</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">server/routes/shares.ts</div>
+                    <div class="file-desc">Task sharing system with expiration and view tracking</div>
+                </div>
+            </div>
+
+            <div class="file-group">
+                <h3>AI Integration Services</h3>
+                <div class="file-item ai-service">
+                    <div class="critical-indicator">!</div>
+                    <div class="file-name">server/domoai.ts</div>
+                    <div class="file-desc">AIDOMO AI service with memory and personalization</div>
+                </div>
+                <div class="file-item ai-service">
+                    <div class="file-name">server/openai.ts</div>
+                    <div class="file-desc">OpenAI GPT integration for task suggestions</div>
+                </div>
+                <div class="file-item ai-service">
+                    <div class="file-name">server/gemini.ts</div>
+                    <div class="file-desc">Google Gemini AI for enhanced analysis</div>
+                </div>
+            </div>
+
+            <div class="file-group">
+                <h3>Authentication & Security</h3>
+                <div class="file-item auth-item">
+                    <div class="file-name">server/enhanced-voice-biometric.ts</div>
+                    <div class="file-desc">Voice biometric processing and verification</div>
+                </div>
+                <div class="file-item auth-item">
+                    <div class="file-name">server/enhanced-voice-auth-routes.ts</div>
+                    <div class="file-desc">Voice authentication API endpoints</div>
+                </div>
+            </div>
+
+            <div class="file-group">
+                <h3>Supporting Services</h3>
+                <div class="file-item">
+                    <div class="file-name">server/email-service.ts</div>
+                    <div class="file-desc">Email notifications and verification system</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">server/scheduler.ts</div>
+                    <div class="file-desc">Background job scheduling and automation</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">server/logger.ts</div>
+                    <div class="file-desc">Comprehensive logging and audit system</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Database Layer -->
+        <div class="layer">
+            <h2>🗄️ Database Architecture</h2>
+            
+            <div class="file-group">
+                <h3>Core Schema</h3>
+                <div class="file-item">
+                    <div class="critical-indicator">!</div>
+                    <div class="file-name">shared/schema.ts</div>
+                    <div class="file-desc">Complete database schema with 12+ tables</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">server/db.ts</div>
+                    <div class="file-desc">Database connection with Neon PostgreSQL</div>
+                </div>
+            </div>
+
+            <div class="file-group">
+                <h3>Critical Tables</h3>
+                <div class="file-item database-item">
+                    <div class="file-name">users</div>
+                    <div class="file-desc">User management with subscription tiers and preferences</div>
+                </div>
+                <div class="file-item database-item">
+                    <div class="file-name">tasks</div>
+                    <div class="file-desc">Complete task lifecycle with scheduling and recurring support</div>
+                </div>
+                <div class="file-item database-item">
+                    <div class="file-name">userMemory</div>
+                    <div class="file-desc">AI memory system for personalized experiences</div>
+                </div>
+                <div class="file-item database-item">
+                    <div class="file-name">achievements</div>
+                    <div class="file-desc">Gamification system with points and progress tracking</div>
+                </div>
+                <div class="file-item database-item">
+                    <div class="file-name">voiceAuth</div>
+                    <div class="file-desc">Voice biometric data with health monitoring</div>
+                </div>
+                <div class="file-item database-item">
+                    <div class="file-name">templates</div>
+                    <div class="file-desc">Reusable task templates with 121+ professional templates</div>
+                </div>
+                <div class="file-item database-item">
+                    <div class="file-name">shares</div>
+                    <div class="file-desc">Task sharing system with expiration and view tracking</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Configuration & Utils -->
+        <div class="layer">
+            <h2>🔧 Configuration & Utilities</h2>
+            
+            <div class="file-group">
+                <h3>Core Configuration</h3>
+                <div class="file-item">
+                    <div class="file-name">package.json</div>
+                    <div class="file-desc">Project dependencies and build scripts</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">drizzle.config.ts</div>
+                    <div class="file-desc">Database migration and schema management</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">vite.config.ts</div>
+                    <div class="file-desc">Build configuration and development server</div>
+                </div>
+            </div>
+
+            <div class="file-group">
+                <h3>Utilities & Libraries</h3>
+                <div class="file-item">
+                    <div class="file-name">client/src/lib/queryClient.ts</div>
+                    <div class="file-desc">TanStack Query configuration for data fetching</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">client/src/lib/audio.ts</div>
+                    <div class="file-desc">Audio processing and alarm sound management</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">client/src/utils/youtube.ts</div>
+                    <div class="file-desc">YouTube URL validation and processing</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Mobile & External -->
+        <div class="layer">
+            <h2>📱 Mobile & External Services</h2>
+            
+            <div class="file-group">
+                <h3>Mobile Application</h3>
+                <div class="file-item">
+                    <div class="file-name">mobile-app/</div>
+                    <div class="file-desc">React Native/Expo mobile application with offline support</div>
+                </div>
+            </div>
+
+            <div class="file-group">
+                <h3>External Integrations</h3>
+                <div class="file-item">
+                    <div class="file-name">Stripe Integration</div>
+                    <div class="file-desc">Payment processing for subscription management</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">Neon Database</div>
+                    <div class="file-desc">Cloud PostgreSQL with connection pooling</div>
+                </div>
+                <div class="file-item">
+                    <div class="file-name">Email Services</div>
+                    <div class="file-desc">Resend, SendGrid, Nodemailer for notifications</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="legend">
+        <div class="legend-item">
+            <div class="legend-color" style="background: #00ff88;"></div>
+            <span>Core Components</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #ff6b6b;"></div>
+            <span>AI Services</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #4ecdc4;"></div>
+            <span>Database</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #ffe66d;"></div>
+            <span>Authentication</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #ff4444;"></div>
+            <span>Critical (!)</span>
+        </div>
+    </div>
+
+    <script>
+        // Add interactive highlighting
+        document.querySelectorAll('.file-item').forEach(item => {
+            item.addEventListener('click', function() {
+                // Remove previous highlights
+                document.querySelectorAll('.file-item').forEach(el => {
+                    el.style.background = '';
+                });
+                
+                // Highlight clicked item
+                this.style.background = 'rgba(0, 255, 136, 0.3)';
+                
+                // Show file details (could be expanded)
+                console.log('File clicked:', this.querySelector('.file-name').textContent);
+            });
+        });
+
+        // Add hover effects for connections
+        document.querySelectorAll('.layer').forEach(layer => {
+            layer.addEventListener('mouseenter', function() {
+                this.style.borderColor = '#ffaa00';
+            });
+            
+            layer.addEventListener('mouseleave', function() {
+                this.style.borderColor = '#00ff88';
+            });
+        });
+    </script>
+</body>
+</html>

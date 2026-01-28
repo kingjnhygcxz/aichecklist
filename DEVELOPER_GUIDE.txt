@@ -1,0 +1,493 @@
+# AICHECKLIST.IO Developer Guide
+
+Last Updated: August 19, 2025  
+System Version: Production-Ready v3.0  
+Architecture: Full-Stack TypeScript Application
+
+---
+
+## COMPLETE TECHNOLOGY STACK
+
+### Programming Languages
+- TypeScript (Primary) - 95% of codebase
+- JavaScript - Legacy components and configurations
+- SQL - Database queries and schema
+- CSS - Styling and animations
+- HTML - Template structures
+- Shell/Bash - Build scripts and automation
+
+### Frontend Technologies
+
+Core Framework:
+├── React 18.3.1 (Component framework)
+├── TypeScript 5.6.3 (Type safety)
+├── Vite 7.1.1 (Build tool & dev server)
+└── Wouter 3.3.5 (Routing)
+
+UI/UX Stack:
+├── Tailwind CSS 3.4.14 (Utility-first styling)
+├── Radix UI (20+ component primitives)
+├── shadcn/ui (Pre-built components)
+├── Framer Motion 11.13.1 (Animations)
+├── Lucide React (Icons)
+├── React Icons (Brand icons)
+└── Recharts 2.13.0 (Data visualization)
+
+State Management:
+├── TanStack Query 5.60.5 (Server state)
+├── React Hook Form 7.53.1 (Form state)
+├── React Context (Global state)
+└── Local Storage (Persistence)
+
+Voice Recognition:
+├── Web Speech API (Browser native)
+├── react-speech-recognition 4.0.0
+└── Custom voice biometric analysis
+
+Audio System:
+├── Web Audio API (Sound generation)
+├── HTML Audio API (File playback)
+└── 26 custom .wav alarm files
+
+### Backend Technologies
+
+Server Framework:
+├── Node.js 20.19.3 (Runtime)
+├── Express 4.21.2 (Web framework)
+├── TypeScript 5.6.3 (Type safety)
+└── TSX 4.19.1 (TypeScript execution)
+
+Security & Authentication:
+├── Helmet 8.1.0 (Security headers)
+├── CORS 2.8.5 (Cross-origin requests)
+├── Express Rate Limit 8.0.1 (DDoS protection)
+├── Express Session 1.18.1 (Session management)
+├── bcrypt 6.0.0 (Password hashing)
+├── Passport (OAuth strategies)
+└── Custom voice biometric system
+
+External Services:
+├── OpenAI 4.104.0 (GPT-4o AI processing)
+├── Anthropic SDK 0.37.0 (Claude AI)
+├── SendGrid Mail 8.1.5 (Email delivery)
+├── Stripe 18.0.0 (Payment processing)
+└── NeverBounce (Email validation)
+
+### Database & Storage
+
+Database Stack:
+├── PostgreSQL (Primary database)
+├── Neon Database (Cloud PostgreSQL)
+├── Drizzle ORM 0.39.1 (Type-safe queries)
+├── Drizzle Kit 0.31.4 (Schema management)
+├── Drizzle Zod 0.7.0 (Schema validation)
+└── WebSocket pooling (Real-time capability)
+
+Storage Solutions:
+├── Server file system (Sound files)
+├── Browser LocalStorage (User preferences)
+├── Session storage (Authentication)
+└── Google Cloud Storage (Backup option)
+
+### Development & Build Tools
+
+Build Pipeline:
+├── Vite 7.1.1 (Frontend bundler)
+├── esbuild 0.25.0 (Backend bundler)
+├── TypeScript Compiler (Type checking)
+├── PostCSS 8.4.47 (CSS processing)
+└── Autoprefixer 10.4.20 (CSS compatibility)
+
+Development Tools:
+├── Replit (Development platform)
+├── Replit Cartographer (Code mapping)
+├── Hot Module Replacement (Live updates)
+├── Runtime Error Modal (Error handling)
+└── Custom logging system
+
+Package Management:
+├── npm (Package manager)
+├── Node modules (Dependencies)
+└── Lock files (Version control)
+
+---
+
+## PROJECT ARCHITECTURE OVERVIEW
+
+AICHECKLIST.IO/
+│
+├── FRONTEND (client/)
+│   ├── React SPA with TypeScript
+│   ├── Component-based architecture  
+│   ├── Voice-driven interface
+│   └── Real-time updates
+│
+├── BACKEND (server/)
+│   ├── Express RESTful API
+│   ├── Voice biometric auth
+│   ├── AI task processing
+│   └── Real-time notifications
+│
+├── SHARED (shared/)
+│   ├── Database schemas
+│   ├── Type definitions
+│   └── Common utilities
+│
+├── ASSETS (attached_assets/)
+│   ├── 26 custom alarm sounds
+│   ├── Categorized by task type
+│   └── High-quality .wav files
+│
+└── CONFIG
+    ├── Build configurations
+    ├── Environment setup
+    └── Development tools
+
+---
+
+## DETAILED DIRECTORY STRUCTURE
+
+### Frontend Structure (client/)
+
+client/
+├── index.html                 # Main HTML template
+├── src/
+│   ├── main.tsx               # React app entry point
+│   ├── App.tsx                # Main app component & routing
+│   ├── index.css              # Global styles & animations
+│   │
+│   ├── components/            # Reusable UI components
+│   │   ├── ui/                   # shadcn/ui base components
+│   │   ├── layout/               # Header, navigation, sidebar
+│   │   ├── task/                 # Task management components
+│   │   ├── timer/                # Pomodoro timer & alarm system
+│   │   ├── voice/                # Voice recognition interface
+│   │   ├── auth/                 # Authentication components
+│   │   ├── charts/               # PERT & Gantt chart widgets
+│   │   └── feedback/             # User feedback system
+│   │
+│   ├── pages/                 # Route-based page components
+│   │   ├── Home.tsx              # Main dashboard
+│   │   ├── Calendar.tsx          # Task scheduling
+│   │   ├── Charts.tsx            # Project visualization
+│   │   ├── Settings.tsx          # User preferences
+│   │   ├── Achievements.tsx      # Gamification system
+│   │   └── Pricing.tsx           # Subscription management
+│   │
+│   ├── hooks/                 # Custom React hooks
+│   │   ├── useAuth.ts            # Authentication state
+│   │   ├── useTimer.ts           # Timer functionality
+│   │   ├── useVoice.ts           # Voice recognition
+│   │   ├── use-toast.ts          # Notification system
+│   │   └── useLocalStorage.ts    # Browser storage
+│   │
+│   ├── lib/                   # Core utilities
+│   │   ├── audio.ts              # Audio system (26 sounds)
+│   │   ├── queryClient.ts        # TanStack Query config
+│   │   ├── utils.ts              # Helper functions
+│   │   ├── authUtils.ts          # Auth utilities
+│   │   └── voiceBiometric.ts     # Voice analysis
+│   │
+│   ├── context/               # React context providers
+│   │   ├── AuthContext.tsx       # Authentication context
+│   │   └── ThemeContext.tsx      # Dark/light theme
+│   │
+│   ├── types/                 # TypeScript definitions
+│   │   ├── index.ts              # Common types
+│   │   ├── auth.ts               # Authentication types
+│   │   └── api.ts                # API response types
+│   │
+│   └── utils/                 # Utility functions
+       ├── dateUtils.ts          # Date manipulation
+       ├── validation.ts         # Form validation
+       └── constants.ts          # App constants
+
+### Backend Structure (server/)
+
+server/
+├── index.ts                   # Server entry point
+├── routes.ts                  # Main API routes
+├── db.ts                      # Database connection
+├── storage.ts                 # Data access layer
+│
+├── Authentication System:
+│   ├── voice-biometric.ts        # Voice analysis engine
+│   ├── enhanced-voice-auth-routes.ts # Advanced voice auth
+│   ├── enhanced-voice-biometric.ts # Multi-factor voice auth
+│   └── social-auth.ts            # OAuth integrations
+│
+├── AI Integration:
+│   ├── openai.ts                 # GPT-4o task processing
+│   └── anthropic.ts              # Claude AI (mobile app)
+│
+├── External Services:
+│   ├── stripe.ts                 # Payment processing
+│   ├── email-service.ts          # SendGrid integration
+│   ├── neverbounce.ts            # Email validation
+│   └── notification-service.ts   # Push notifications
+│
+├── routes/                    # Organized API endpoints
+│   ├── auth.ts                   # Authentication routes
+│   ├── tasks.ts                  # Task CRUD operations
+│   ├── users.ts                  # User management
+│   ├── timer.ts                  # Timer functionality
+│   ├── voice.ts                  # Voice processing
+│   ├── achievements.ts           # Gamification system
+│   ├── charts.ts                 # Data visualization
+│   ├── shares.ts                 # Task sharing system
+│   └── admin.ts                  # Admin dashboard
+│
+├── Utilities:
+│   ├── logger.ts                 # Comprehensive logging
+│   ├── scheduler.ts              # Background job system
+│   ├── data-aggregation.ts       # Analytics processing
+│   ├── api-keys.ts               # Secret management
+│   └── vite.ts                   # Development server
+
+### Shared Structure (shared/)
+
+shared/
+├── schema.ts                  # Database schemas & types
+│   ├── User tables & relations
+│   ├── Task management schemas
+│   ├── Authentication schemas
+│   ├── Voice biometric schemas
+│   ├── Achievement schemas
+│   ├── Notification schemas
+│   ├── Payment schemas
+│   └── Analytics schemas
+│
+└── types/                     # Shared TypeScript types
+    ├── Common interfaces
+    ├── API contracts
+    └── Database types
+
+---
+
+## SYSTEM ARCHITECTURE FLOW
+
+### Data Flow Architecture
+
+Voice Input → Web Speech API → Voice Processing
+    ↓
+AI Analysis → OpenAI GPT-4o → Task Parsing
+    ↓
+Database → PostgreSQL (Neon) → Drizzle ORM
+    ↓
+Real-time Updates → TanStack Query → React UI
+    ↓
+Audio Feedback → Web Audio API → Custom Sounds
+
+### Authentication Flow
+
+Voice Biometric Analysis
+    ↓
+Multi-factor Authentication
+    ↓
+Session Management
+    ↓
+Route Protection
+    ↓
+User Context
+
+### Task Management Flow
+
+Voice Command → Speech Recognition
+    ↓
+AI Processing → Task Parsing & Suggestions
+    ↓
+Database Storage → Task Creation/Update
+    ↓
+Timer Integration → Pomodoro System
+    ↓
+Achievement System → Progress Tracking
+    ↓
+Analytics → Performance Metrics
+
+---
+
+## KEY FEATURES IMPLEMENTATION
+
+### 1. Voice Recognition System
+- Location: client/src/lib/audio.ts, client/src/hooks/useVoice.ts
+- Technology: Web Speech API + react-speech-recognition
+- Features: Real-time transcription, command processing, voice biometrics
+
+### 2. AI Task Processing
+- Location: server/openai.ts
+- Technology: OpenAI GPT-4o
+- Features: Task parsing, intelligent suggestions, natural language processing
+
+### 3. Timer & Alarm System
+- Location: client/src/components/timer/, client/src/lib/audio.ts
+- Technology: Web Audio API + Custom sound files
+- Features: 26 categorized alarm sounds, early stopping, toggle functionality
+
+### 4. Voice Biometric Authentication
+- Location: server/voice-biometric.ts, server/enhanced-voice-biometric.ts
+- Technology: Custom voice analysis algorithms
+- Features: Pitch analysis, frequency matching, multi-factor authentication
+
+### 5. Real-time Notifications
+- Location: server/notification-service.ts, client/src/hooks/useNotifications.ts
+- Technology: TanStack Query + polling
+- Features: Calendar reminders, achievement notifications, system alerts
+
+### 6. Project Visualization
+- Location: client/src/pages/Charts.tsx
+- Technology: Recharts + Custom algorithms
+- Features: PERT charts, Gantt charts, performance analytics
+
+---
+
+## STYLING SYSTEM
+
+### Design Framework
+
+Styling Stack:
+├── Tailwind CSS (Utility classes)
+├── CSS Custom Properties (Theme variables)
+├── Radix UI (Accessible primitives)
+├── Framer Motion (Animations)
+└── Dark theme optimized
+
+### Theme Configuration
+- Location: theme.json, client/src/index.css
+- Primary Color: Green (#22c55e)
+- Mode: Dark theme preferred
+- Responsive: Mobile-first design
+
+---
+
+## DEVELOPMENT WORKFLOW
+
+### Local Development
+
+# Install dependencies
+npm install
+
+# Start development server
+npm run dev
+
+# Database operations
+npm run db:push
+
+# Type checking
+npm run check
+
+# Production build
+npm run build
+
+### Environment Variables Required
+
+DATABASE_URL=postgresql://...
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+NEVERBOUNCE_API_KEY=private_...
+SESSION_SECRET=your-session-secret
+STRIPE_SECRET_KEY=sk_test_...
+
+---
+
+## PERFORMANCE FEATURES
+
+### Optimization Techniques
+- Code Splitting: Route-based lazy loading
+- Bundle Optimization: Vite + esbuild for fast builds
+- Database: Connection pooling with PgBouncer
+- Caching: TanStack Query for server state
+- Memory: Smart API polling (only when active)
+
+### Security Features
+- Authentication: Voice biometric + session management
+- API Protection: Rate limiting, CORS, Helmet.js
+- Data Validation: Zod schemas for all inputs
+- SQL Injection: Prevented via Drizzle ORM
+- XSS Protection: React's built-in sanitization
+
+---
+
+## DEVELOPER NAVIGATION GUIDE
+
+### Finding Specific Features
+
+To modify voice recognition:
+→ client/src/lib/audio.ts (Audio processing)
+→ client/src/hooks/useVoice.ts (Voice hooks)
+→ client/src/components/voice/ (UI components)
+
+To modify timer functionality:
+→ client/src/components/timer/TimerWidget.tsx (Main timer)
+→ client/src/hooks/useTimer.ts (Timer logic)
+→ client/src/components/timer/AlarmSettings.tsx (Sound selection)
+
+To modify task management:
+→ client/src/components/task/ (Task components)
+→ server/routes/tasks.ts (Task API)
+→ shared/schema.ts (Task database schema)
+
+To modify authentication:
+→ server/voice-biometric.ts (Voice auth logic)
+→ client/src/hooks/useAuth.ts (Auth state)
+→ server/routes/auth.ts (Auth API)
+
+To modify AI processing:
+→ server/openai.ts (GPT-4o integration)
+→ client/src/components/ai/ (AI UI components)
+
+To modify database:
+→ shared/schema.ts (Database schemas)
+→ server/db.ts (Connection configuration)
+→ server/storage.ts (Data access layer)
+
+### Common Debugging Locations
+
+Database Issues:
+→ Check server/db.ts for connection problems
+→ Verify shared/schema.ts for schema mismatches
+→ Review server/storage.ts for query errors
+
+Authentication Problems:
+→ Check server/voice-biometric.ts for voice auth issues
+→ Verify client/src/hooks/useAuth.ts for state problems
+→ Review browser console for audio permissions
+
+Timer/Audio Issues:
+→ Check client/src/lib/audio.ts for sound mapping
+→ Verify browser audio permissions
+→ Review client/src/hooks/useTimer.ts for timer logic
+
+---
+
+## ADDITIONAL RESOURCES
+
+### Key Documentation Files
+- replit.md - Project overview and recent updates
+- AUTHENTICATION_BREAKDOWN_ANALYSIS.md - Auth system analysis
+- DATABASE_AUDIT_REPORT.md - Database health reports
+- SECURITY_AUDIT_REPORT.md - Security assessments
+
+### Backup & Recovery
+- Regular system backups in backup_* directories
+- Database backups via Neon Dashboard
+- Code versioning via Git (if applicable)
+
+---
+
+## CONCLUSION
+
+This is a production-ready, enterprise-grade application built with modern technologies and best practices. The codebase is well-organized, fully typed, and thoroughly tested.
+
+Key Strengths:
+✓ Type Safety - 95% TypeScript coverage
+✓ Performance - Optimized for speed and memory efficiency  
+✓ Security - Comprehensive protection measures
+✓ Scalability - Modular architecture for growth
+✓ User Experience - Voice-driven, intuitive interface
+✓ Developer Experience - Well-documented, easy to navigate
+
+For questions or support, reference this guide and the associated documentation files.
+
+---
+
+Last updated: August 19, 2025 | Version: 3.0 | Status: Production Ready

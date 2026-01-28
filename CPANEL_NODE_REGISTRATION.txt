@@ -1,0 +1,61 @@
+🚀 CPANEL NODE.JS APPLICATION REGISTRATION
+==========================================
+
+STEP 1: FIND NODE.JS SECTION
+============================
+In cPanel, look for:
+- "Node.js Apps" or
+- "Node.js Selector" or  
+- "Application Manager"
+
+Click "Register New Application" or "Create Application"
+
+STEP 2: FILL IN APPLICATION DETAILS
+===================================
+Application Name: AIChecklist-IO
+Application Root: public_html (or your current folder)
+Application URL: http://your-domain.com
+Application Startup File: dist/index.js (CRITICAL - NOT server/index.ts!)
+Node.js Version: 18.x or higher
+Application Mode: production (CRITICAL - NOT development!)
+
+STEP 3: ADD ENVIRONMENT VARIABLES
+=================================
+In the environment variables section, add:
+
+NODE_ENV=production
+DATABASE_URL=your_postgresql_connection_string
+OPENAI_API_KEY=your_openai_key  
+RESEND_API_KEY=your_resend_key
+FROM_EMAIL=your_email_address
+PORT=5000
+
+STEP 4: CLICK CREATE/REGISTER
+=============================
+Save the application configuration.
+
+STEP 5: START THE APPLICATION
+============================
+In cPanel, click "Start" or "Run" on your registered application.
+
+VERIFICATION:
+============
+- Visit: http://your-domain.com/api/health
+- Should return JSON status (no Vite errors!)
+- Visit: http://your-domain.com/
+- Should load your AIChecklist.io app
+
+TROUBLESHOOTING:
+===============
+If still getting Vite errors:
+1. Double-check Startup File is "dist/index.js" (not server/index.ts)
+2. Make sure Mode is "production" (not development)  
+3. Verify dist/index.js file exists in your folder
+4. Restart the application in cPanel
+
+WHY THIS WORKS:
+==============
+- dist/index.js = production build (no Vite)
+- server/index.ts = development code (causes Vite errors)
+- production mode = uses built files
+- development mode = uses Vite dev server

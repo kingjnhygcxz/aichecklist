@@ -1,0 +1,60 @@
+============================================
+AICHECKLIST.IO - HOSTING PROVIDER SETUP
+============================================
+
+CRITICAL: This is a PRODUCTION application - DO NOT use development mode!
+
+REQUIRED SETUP STEPS:
+===================
+
+1. INSTALL DEPENDENCIES:
+   npm install
+
+2. BUILD FOR PRODUCTION:
+   npm run build
+   
+   This creates:
+   - Frontend build in 'dist/client/'
+   - Backend build in 'dist/index.js'
+
+3. START PRODUCTION SERVER:
+   npm start
+   
+   OR directly:
+   NODE_ENV=production node dist/index.js
+
+ENVIRONMENT VARIABLES NEEDED:
+===========================
+- DATABASE_URL (PostgreSQL connection string)
+- OPENAI_API_KEY
+- RESEND_API_KEY
+- FROM_EMAIL
+- SESSION_SECRET (random 32-byte string)
+
+PORT CONFIGURATION:
+==================
+- Application runs on port 5000 by default
+- Set PORT environment variable if different port needed
+
+IMPORTANT NOTES:
+===============
+- DO NOT run "npm run dev" - this is development only
+- DO NOT run "tsx server/index.ts" - this requires dev dependencies
+- Application serves static files from dist/client/
+- Database migrations run automatically on startup
+
+TROUBLESHOOTING:
+===============
+If you see Vite module errors:
+1. Delete node_modules folder
+2. Run "npm install" again
+3. Run "npm run build" 
+4. Run "npm start"
+
+VERIFY WORKING:
+==============
+- Server should start on specified port
+- Health check: GET /api/health
+- Should return JSON with system status
+
+Contact us if you need assistance with the setup.

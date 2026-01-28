@@ -1,0 +1,41 @@
+{
+  "expo": {
+    "name": "AI Checklist",
+    "slug": "ai-checklist",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#121212"
+    },
+    "updates": {
+      "fallbackToCacheTimeout": 0
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.yourcompany.aichecklist"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#121212"
+      },
+      "package": "com.yourcompany.aichecklist"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "description": "A minimalist AI-assisted checklist application with timers and Anthropic Claude integration.",
+    "primaryColor": "#10b981",
+    "plugins": [
+      "expo-secure-store",
+      "expo-av"
+    ]
+  }
+}

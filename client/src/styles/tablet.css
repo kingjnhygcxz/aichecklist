@@ -1,0 +1,301 @@
+/* Tablet-specific styles for improved touch interactions */
+
+/* Prevent unwanted scrolling and improve touch behavior */
+.tablet-mode {
+  /* Disable pull-to-refresh and overscroll effects */
+  overscroll-behavior: none;
+  -webkit-overflow-scrolling: touch;
+  
+  /* Prevent text selection during touch interactions */
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  -khtml-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+}
+
+/* Body modifications for tablet mode to prevent unwanted scrolling */
+body.tablet-mode {
+  /* Prevent bouncing/overscroll */
+  overscroll-behavior: none;
+  /* Stable scrolling behavior */
+  touch-action: pan-y;
+}
+
+body.tablet-mode #root {
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Stable timer interactions - prevent page jumps */
+.tablet-timer-container {
+  /* Prevent layout shifts when timers are activated */
+  contain: layout style paint;
+  /* Improve touch target sizing */
+  min-height: 44px;
+  /* Prevent scroll jumps on tap */
+  touch-action: manipulation;
+}
+
+/* Enhanced touch targets for tablets */
+.tablet-touch-target {
+  min-height: 44px;
+  min-width: 44px;
+  /* Larger tap targets for better usability */
+  padding: 12px;
+  /* Visual feedback on touch */
+  transition: background-color 0.15s ease;
+}
+
+.tablet-touch-target:active {
+  background-color: rgba(var(--primary), 0.1);
+  transform: scale(0.98);
+}
+
+/* Timer-specific tablet optimizations */
+.tablet-timer-dial {
+  /* Prevent scroll interference during dial interaction */
+  touch-action: none;
+  /* Improve touch precision */
+  user-select: none;
+  -webkit-user-select: none;
+  /* Stable positioning */
+  position: relative;
+  isolation: isolate;
+}
+
+/* Prevent page bouncing when interacting with fixed elements */
+.tablet-fixed-panel {
+  /* Prevent scroll interference */
+  touch-action: pan-y pinch-zoom;
+  /* Ensure content doesn't shift */
+  contain: layout style;
+  /* Smooth interactions */
+  will-change: transform;
+  backface-visibility: hidden;
+}
+
+/* Card interactions optimized for tablets */
+.tablet-card {
+  /* Better touch feedback */
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  /* Prevent text selection during touch */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.tablet-card:active {
+  transform: translateY(1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+/* Task list optimizations for tablets */
+.tablet-task-list {
+  /* Smooth scrolling */
+  scroll-behavior: smooth;
+  /* Prevent overscroll */
+  overscroll-behavior: contain;
+  /* Better spacing for touch */
+  gap: 16px;
+}
+
+/* Timer controls with enhanced touch targets */
+.tablet-timer-controls {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+  /* Prevent layout shift */
+  contain: layout;
+}
+
+.tablet-timer-button {
+  /* Larger touch targets */
+  min-height: 48px;
+  min-width: 48px;
+  /* Better visual feedback */
+  transition: all 0.2s ease;
+  /* Prevent double-tap zoom */
+  touch-action: manipulation;
+  /* Consistent spacing */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tablet-timer-button:active {
+  transform: scale(0.95);
+  background-color: rgba(var(--primary), 0.2);
+}
+
+/* Active timers panel optimizations */
+.tablet-active-timers {
+  /* Prevent scroll conflicts */
+  touch-action: pan-y;
+  /* Stable positioning */
+  contain: layout style;
+  /* Better spacing */
+  padding: 16px;
+}
+
+/* Main timer display optimizations */
+.tablet-main-timer {
+  /* Prevent unwanted interactions */
+  touch-action: manipulation;
+  /* Center content properly */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  /* Stable layout */
+  contain: layout style;
+}
+
+/* Responsive improvements for tablet landscape/portrait */
+@media screen and (min-width: 768px) and (max-width: 1024px) {
+  .tablet-grid {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    gap: 24px;
+    min-height: 100vh;
+  }
+  
+  .tablet-main-content {
+    min-width: 0; /* Prevent overflow */
+  }
+  
+  .tablet-sidebar {
+    position: sticky;
+    top: 80px;
+    height: fit-content;
+    max-height: calc(100vh - 100px);
+    overflow-y: auto;
+  }
+}
+
+/* Portrait tablet adjustments */
+@media screen and (min-width: 768px) and (max-width: 1024px) and (orientation: portrait) {
+  .tablet-grid {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+  
+  .tablet-sidebar {
+    position: relative;
+    top: auto;
+    max-height: none;
+  }
+}
+
+/* Prevent zoom on double tap for form inputs */
+.tablet-input {
+  font-size: 16px; /* Prevents zoom on iOS */
+  touch-action: manipulation;
+}
+
+/* Smooth animations that respect reduced motion */
+@media (prefers-reduced-motion: no-preference) {
+  .tablet-smooth-transition {
+    transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+}
+
+/* Focus states for keyboard navigation on tablets with keyboards */
+.tablet-focusable:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Mobile scrolling fixes - allow vertical scrolling on small screens */
+@media screen and (max-width: 767px) {
+  /* Enable scrolling on mobile */
+  html, body {
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    height: auto !important;
+    min-height: 100vh;
+    -webkit-overflow-scrolling: touch;
+    position: relative !important;
+  }
+  
+  #root {
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    min-height: 100vh;
+    height: auto !important;
+    position: relative !important;
+  }
+  
+  /* Fix main container to allow scrolling */
+  .mobile-scroll-container {
+    overflow-y: visible !important;
+    overflow-x: hidden !important;
+    -webkit-overflow-scrolling: touch;
+    min-height: auto !important;
+    height: auto !important;
+  }
+  
+  /* Remove fixed heights on mobile that cause cutoff */
+  .min-h-screen {
+    min-height: 100vh;
+    height: auto !important;
+  }
+  
+  /* Remove min-height restrictions on mobile */
+  .min-h-\[600px\] {
+    min-height: auto !important;
+  }
+  
+  /* Make resizable panels stack on mobile */
+  .mobile-panel-stack {
+    display: flex !important;
+    flex-direction: column !important;
+    height: auto !important;
+    min-height: auto !important;
+  }
+  
+  /* Ensure main content is scrollable */
+  main {
+    overflow-y: visible !important;
+    overflow-x: hidden !important;
+    height: auto !important;
+  }
+  
+  /* Tab content should be scrollable */
+  [role="tabpanel"] {
+    overflow-y: visible !important;
+    max-height: none !important;
+    height: auto !important;
+  }
+  
+  /* Auth page fixes */
+  .auth-container {
+    overflow-y: auto !important;
+    height: auto !important;
+    min-height: 100vh;
+  }
+  
+  /* Dialog content should scroll on mobile */
+  [role="dialog"] {
+    max-height: 90vh !important;
+    overflow-y: auto !important;
+  }
+  
+  /* Resizable panel group mobile fix */
+  [data-panel-group] {
+    min-height: auto !important;
+    height: auto !important;
+    flex-direction: column !important;
+  }
+  
+  [data-panel] {
+    min-height: auto !important;
+    height: auto !important;
+  }
+  
+  /* Hide resizable handles on mobile */
+  [data-resize-handle] {
+    display: none !important;
+  }
+}

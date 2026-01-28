@@ -1,0 +1,116 @@
+{
+  "schemas": {
+    "organization": {
+      "@context": "https://schema.org",
+      "@type": "Organization",
+      "name": "AIChecklist.io",
+      "url": "https://aichecklist.io",
+      "logo": "https://aichecklist.io/logo.png",
+      "description": "AI-powered task management platform with professional templates and AIDOMO assistant",
+      "sameAs": [
+        "https://twitter.com/aichecklist",
+        "https://linkedin.com/company/aichecklist"
+      ],
+      "contactPoint": {
+        "@type": "ContactPoint",
+        "contactType": "customer service",
+        "email": "support@aichecklist.io"
+      }
+    },
+    "software": {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "AIChecklist.io",
+      "description": "AI-powered task management platform with 226+ professional templates, AIDOMO assistant, voice authentication, and smart calendar integration",
+      "url": "https://aichecklist.io",
+      "applicationCategory": "ProductivityApplication",
+      "operatingSystem": "Web, iOS, Android",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "aggregateRating": {
+        "@type": "AggregateRating",
+        "ratingValue": "4.8",
+        "ratingCount": "1247"
+      }
+    },
+    "faq": {
+      "@context": "https://schema.org",
+      "@type": "FAQPage",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "What is AIChecklist.io?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "AIChecklist.io is an AI-powered task management platform featuring 226+ professional templates, AIDOMO AI assistant, voice authentication, and smart calendar integration for enhanced productivity."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "How does AIDOMO AI assistant work?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "AIDOMO is an intelligent AI assistant that helps you create tasks, schedule events, prioritize work, and optimize your productivity through natural language conversations and smart suggestions."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Is voice authentication secure?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Yes, our voice authentication uses enterprise-grade biometric technology with adaptive learning and health monitoring for secure, convenient access to your account."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "How many templates are available?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "We offer 226+ professional checklist templates covering business, startups, healthcare, education, technology, and many other industries and use cases."
+          }
+        }
+      ]
+    },
+    "howto": {
+      "@context": "https://schema.org",
+      "@type": "HowTo",
+      "name": "How to Create an AI-Powered Checklist",
+      "description": "Step-by-step guide to creating intelligent checklists using AIChecklist.io's AI features and templates",
+      "step": [
+        {
+          "@type": "HowToStep",
+          "position": 1,
+          "name": "Sign up for AIChecklist.io",
+          "text": "Create your free account at AIChecklist.io with email or voice authentication"
+        },
+        {
+          "@type": "HowToStep",
+          "position": 2,
+          "name": "Choose a template or create from scratch",
+          "text": "Browse 226+ professional templates or start with a blank checklist"
+        },
+        {
+          "@type": "HowToStep",
+          "position": 3,
+          "name": "Use AIDOMO AI assistant",
+          "text": "Ask AIDOMO to suggest tasks, optimize priorities, or schedule items automatically"
+        },
+        {
+          "@type": "HowToStep",
+          "position": 4,
+          "name": "Customize and organize",
+          "text": "Add categories, set priorities, include timers, and organize with drag-and-drop"
+        },
+        {
+          "@type": "HowToStep",
+          "position": 5,
+          "name": "Schedule and track progress",
+          "text": "Use the smart calendar to schedule tasks and track completion with achievements"
+        }
+      ]
+    }
+  }
+}

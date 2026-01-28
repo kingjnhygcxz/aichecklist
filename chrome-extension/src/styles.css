@@ -1,0 +1,383 @@
+/* AIDomo Voice Bar Styles */
+/* Injected into all pages via content script */
+
+#aidomo-root {
+  all: initial;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #1a1a1a;
+  z-index: 2147483647;
+}
+
+#aidomo-root * {
+  box-sizing: border-box;
+}
+
+/* Wake pill button (when voice bar is closed) */
+.aidomo-wake-pill {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 2147483646;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 24px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #1a1a1a;
+  cursor: pointer;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.04);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  transition: all 0.2s ease;
+}
+
+.aidomo-wake-pill:hover {
+  background: rgba(255, 255, 255, 1);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.06);
+  transform: translateY(-1px);
+}
+
+.aidomo-wake-pill .shortcut {
+  color: #666;
+  font-size: 11px;
+  padding: 2px 6px;
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 4px;
+}
+
+/* Voice bar container (docked mode) */
+.aidomo-voice-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: 0;
+  z-index: 2147483647;
+  display: flex;
+  justify-content: center;
+  padding: 12px;
+  pointer-events: none;
+}
+
+.aidomo-voice-bar.hidden {
+  display: none;
+}
+
+.aidomo-bar-inner {
+  width: 100%;
+  max-width: 720px;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 20px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.12), 0 4px 12px rgba(0, 0, 0, 0.06);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  pointer-events: auto;
+  animation: aidomo-slide-down 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes aidomo-slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Detached mode */
+.aidomo-voice-bar.detached {
+  position: fixed;
+  left: auto;
+  right: auto;
+  top: auto;
+  padding: 0;
+  cursor: grab;
+}
+
+.aidomo-voice-bar.detached:active {
+  cursor: grabbing;
+}
+
+.aidomo-voice-bar.detached .aidomo-bar-inner {
+  width: 480px;
+  max-width: calc(100vw - 24px);
+}
+
+/* Bar content */
+.aidomo-bar-content {
+  padding: 16px 20px;
+}
+
+/* Header row */
+.aidomo-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.aidomo-logo-section {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.aidomo-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #1a1a1a 0%, #333 100%);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.aidomo-title-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.aidomo-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.aidomo-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1a1a1a;
+}
+
+.aidomo-status-badge {
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: 12px;
+  background: #f0f0f0;
+  color: #666;
+}
+
+.aidomo-status-badge.listening {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.aidomo-status-badge.thinking {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.aidomo-status-badge.speaking {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.aidomo-status-badge.error {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.aidomo-hint {
+  font-size: 12px;
+  color: #666;
+}
+
+/* Control buttons */
+.aidomo-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.aidomo-btn {
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #333;
+  background: white;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.aidomo-btn:hover {
+  background: #f5f5f5;
+  border-color: rgba(0, 0, 0, 0.18);
+}
+
+.aidomo-btn.primary {
+  background: #1a1a1a;
+  color: white;
+  border-color: #1a1a1a;
+}
+
+.aidomo-btn.primary:hover {
+  background: #333;
+}
+
+/* Main content area */
+.aidomo-main {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+/* Waveform visualizer */
+.aidomo-waveform {
+  width: 120px;
+  height: 44px;
+  padding: 8px 12px;
+  background: white;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.aidomo-waveform-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 100%;
+}
+
+.aidomo-waveform-bar {
+  width: 4px;
+  min-height: 4px;
+  background: #1a1a1a;
+  border-radius: 2px;
+  transition: height 0.08s ease-out;
+}
+
+/* Transcript area */
+.aidomo-transcript {
+  flex: 1;
+  min-width: 0;
+}
+
+.aidomo-transcript-box {
+  padding: 12px 16px;
+  background: white;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 14px;
+  min-height: 44px;
+}
+
+.aidomo-transcript-text {
+  font-size: 14px;
+  color: #1a1a1a;
+  word-wrap: break-word;
+}
+
+.aidomo-transcript-text.placeholder {
+  color: #999;
+}
+
+.aidomo-transcript-text .partial {
+  color: #666;
+  font-style: italic;
+}
+
+/* Tips */
+.aidomo-tips {
+  margin-top: 8px;
+  font-size: 11px;
+  color: #888;
+}
+
+.aidomo-tips kbd {
+  display: inline-block;
+  padding: 2px 5px;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  background: #f0f0f0;
+  border-radius: 4px;
+  margin: 0 2px;
+}
+
+/* Response area */
+.aidomo-response {
+  margin-top: 12px;
+  padding: 12px 16px;
+  background: #f9fafb;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 14px;
+}
+
+.aidomo-response-text {
+  font-size: 14px;
+  color: #1a1a1a;
+}
+
+.aidomo-response-text.success {
+  color: #166534;
+}
+
+.aidomo-response-text.error {
+  color: #991b1b;
+}
+
+/* Auth prompt */
+.aidomo-auth-prompt {
+  margin-top: 12px;
+  padding: 12px 16px;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.aidomo-auth-text {
+  font-size: 13px;
+  color: #92400e;
+}
+
+.aidomo-auth-link {
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: white;
+  background: #1a1a1a;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.aidomo-auth-link:hover {
+  background: #333;
+}
+
+/* Speech not supported warning */
+.aidomo-warning {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: #92400e;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  border-radius: 8px;
+}

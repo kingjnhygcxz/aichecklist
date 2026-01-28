@@ -1,0 +1,7274 @@
+import express, { type Express, Request, Response } from "express";
+import { createServer, type Server } from "http";
+import { chatWithGemini, geminiCompletion, analyzeTaskPatterns, getProductivityTips, safeJSONParse } from "./gemini";
+import helmet from "helmet";
+import cors from "cors";
+import rateLimit from "express-rate-limit";
+import { storage } from "./storage";
+import { User } from "@shared/schema";
+import { registerEnhancedVoiceAuthRoutes } from "./enhanced-voice-auth-routes";
+import { toUserSettings, toUserUpdate } from "./utils/settingsMapper";
+import { generateTaskSuggestions, parseTasksFromTranscript } from "./openai";
+import OpenAI from "openai";
+import { domoAI } from "./domoai";
+import { chatStyleFormat } from "./chatStyleFormat";
+import { logger } from "./logger";
+import { secureAuditLogger, createSecureDomoAIMiddleware, createAuditCompletionMiddleware } from "./secure-audit-logger";
+import { processAudioBase64, compareVoiceFeatures, VoiceFeatures } from './voice-biometric';
+import { WebSocketServer } from 'ws';
+import { v4 as uuidv4 } from 'uuid';
+import { db } from './db';
+import { sharedTasks as sharedTasksTable, RecurringFrequency, users, tasks, appointments, sessions, systemMigrations, scheduleShares } from '@shared/schema';
+import sharesRouter from './routes/shares';
+import videoRouter from './routes/video';
+import preferencesRouter from './routes/preferences';
+import vrRouter from './routes/vr';
+import aiFeaturesRouter from './routes/ai-features';
+import notionRouter from './routes/notion';
+import trelloRouter from './routes/trello';
+import scheduleSharesRouter from './routes/schedule-shares';
+import { setupSEORoutes } from './seo-routes';
+import { eq, lt, desc, sql, or, and } from 'drizzle-orm';
+import { getGeoInfo } from './middleware/geo-block';
+import { monitorAIRequest } from './services/compliance-monitor';
+import { getApiKeys, saveApiKey } from './api-keys';
+import {
+  stripe,
+  createStripeCustomer,
+  startFreeTrial,
+  createSubscription,
+  getUserSubscription,
+  cancelSubscription,
+  handleStripeWebhook
+} from './stripe';
+import { insertFeedbackSchema, notifications, subscriptionPlans, communityTemplates, communityTemplateTasks, insertCommunityTemplateSchema, insertCommunityTemplateTaskSchema } from '@shared/schema';
+import { notificationService } from './notification-service';
+import { taskScheduler } from './scheduler';
+import { templateManager } from './templateManager';
+import { validateEmail, isEmailDeliverable, getEmailValidationMessage } from './neverbounce';
+import { 
+  generateVerificationToken, 
+  storeVerificationToken, 
+  sendVerificationEmail,
+  getVerificationToken,
+  removeVerificationToken,
+  sendEmail,
+  sendLoginCodeEmail
+} from './email-service';
+import * as crypto from 'crypto';
+import * as bcrypt from 'bcrypt';
+import * as path from 'path';
+import * as fs from 'fs';
+import { DateTime } from 'luxon';
+import Stripe from 'stripe';
+
+// Create OpenAI client for AIDOMO
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+// Content moderation for video URLs - block adult/inappropriate content
+const BLOCKED_VIDEO_DOMAINS = [
+  'pornhub', 'xvideos', 'xhamster', 'xnxx', 'redtube', 'youporn', 
+  'tube8', 'spankbang', 'brazzers', 'bangbros', 'realitykings',
+  'mofos', 'naughtyamerica', 'fakehub', 'twistys', 'babes',
+  'ixxx', 'hclips', 'txxx', 'vjav', 'javhd', 'eporner',
+  'porn', 'xxx', 'adult', 'sex', 'nude', 'naked', 'erotic',
+  'camgirl', 'onlyfans', 'fansly', 'livejasmin', 'chaturbate',
+  'stripchat', 'bongacams', 'myfreecams', 'cam4'
+];
+
+const BLOCKED_TITLE_KEYWORDS = [
+  'nude', 'nudes', 'naked', 'sex', 'sexy', 'porn', 'porno', 'pornographic',
+  'xxx', 'adult', 'erotic', 'erotica', 'fetish', 'bdsm', 'bondage',
+  'orgasm', 'masturbat', 'dildo', 'vibrator', 'blowjob', 'handjob',
+  'gangbang', 'threesome', 'foursome', 'orgy', 'anal', 'vagina', 'penis',
+  'cock', 'dick', 'pussy', 'boob', 'tit', 'breast', 'nipple',
+  'cum', 'cumshot', 'creampie', 'facial', 'deepthroat', 'milf',
+  'teen', 'barely legal', 'underage', 'minor', 'child',
+  'incest', 'step-', 'stepmom', 'stepdad', 'stepsister', 'stepbrother',
+  'hentai', 'rule34', 'nsfw', 'explicit', 'uncensored',
+  'stripper', 'escort', 'prostitut', 'hooker', 'whore', 'slut',
+  'fuck', 'fucking', 'fucked', 'fck', 'fuk',
+  'onlyfans', 'leaked', 'private video', 'homemade porn',
+  'camgirl', 'cam show', 'live show', 'webcam girl'
+];
+
+interface ContentModerationResult {
+  isBlocked: boolean;
+  reason?: string;
+}
+
+function moderateVideoContent(url: string | null, title?: string): ContentModerationResult {
+  if (!url) return { isBlocked: false };
+  
+  const lowerUrl = url.toLowerCase();
+  const lowerTitle = (title || '').toLowerCase();
+  
+  // Check if URL is from YouTube (allowed)
+  const isYouTube = lowerUrl.includes('youtube.com') || 
+                    lowerUrl.includes('youtu.be') || 
+                    lowerUrl.includes('youtube-nocookie.com');
+  
+  // For YouTube URLs, still check the title for inappropriate content
+  if (isYouTube) {
+    for (const keyword of BLOCKED_TITLE_KEYWORDS) {
+      if (lowerTitle.includes(keyword)) {
+        logger.warn('Blocked YouTube video with inappropriate title', { url, title, keyword });
+        return { 
+          isBlocked: true, 
+          reason: `Video title contains inappropriate content. Adult content is not permitted.` 
+        };
+      }
+    }
+    return { isBlocked: false };
+  }
+  
+  // Check for blocked video domains
+  for (const domain of BLOCKED_VIDEO_DOMAINS) {
+    if (lowerUrl.includes(domain)) {
+      logger.warn('Blocked video from inappropriate domain', { url, domain });
+      return { 
+        isBlocked: true, 
+        reason: `Videos from this source are not permitted. Only YouTube videos are allowed.` 
+      };
+    }
+  }
+  
+  // Check URL for inappropriate keywords
+  for (const keyword of BLOCKED_TITLE_KEYWORDS) {
+    if (lowerUrl.includes(keyword)) {
+      logger.warn('Blocked video URL with inappropriate keyword', { url, keyword });
+      return { 
+        isBlocked: true, 
+        reason: `Video URL contains inappropriate content. Adult content is not permitted.` 
+      };
+    }
+  }
+  
+  // Check title for inappropriate keywords
+  for (const keyword of BLOCKED_TITLE_KEYWORDS) {
+    if (lowerTitle.includes(keyword)) {
+      logger.warn('Blocked video with inappropriate title', { url, title, keyword });
+      return { 
+        isBlocked: true, 
+        reason: `Video title contains inappropriate content. Adult content is not permitted.` 
+      };
+    }
+  }
+  
+  // For non-YouTube URLs, warn but allow (user might have legitimate video sources)
+  // But log it for monitoring
+  if (!isYouTube) {
+    logger.info('Non-YouTube video URL submitted', { url });
+  }
+  
+  return { isBlocked: false };
+}
+
+// Helper function to create a session in database
+async function createSession(userId: number, rememberMe: boolean = false): Promise<string> {
+  const sessionId = uuidv4();
+  const expiresAt = new Date();
+  
+  if (rememberMe) {
+    // Keep logged in for 30 days
+    expiresAt.setDate(expiresAt.getDate() + 30);
+  } else {
+    // Short session - 1 day only
+    expiresAt.setDate(expiresAt.getDate() + 1);
+  }
+  
+  await db.insert(sessions).values({
+    sessionId,
+    userId,
+    expiresAt,
+  });
+  
+  return sessionId;
+}
+
+// Helper function to get user ID from session (database)
+async function getUserIdFromSession(sessionId: string): Promise<number | null> {
+  try {
+    const result = await db
+      .select({ userId: sessions.userId })
+      .from(sessions)
+      .where(eq(sessions.sessionId, sessionId))
+      .limit(1);
+    
+    if (result.length === 0) {
+      return null;
+    }
+    
+    const session = result[0];
+    
+    // Update last activity timestamp
+    await db
+      .update(sessions)
+      .set({ lastActivityAt: new Date() })
+      .where(eq(sessions.sessionId, sessionId));
+    
+    return session.userId;
+  } catch (error) {
+    logger.error('Error getting user from session', { error, sessionId });
+    return null;
+  }
+}
+
+// Helper function to clear session from database
+async function clearSession(sessionId: string): Promise<void> {
+  try {
+    await db.delete(sessions).where(eq(sessions.sessionId, sessionId));
+  } catch (error) {
+    logger.error('Error clearing session', { error, sessionId });
+  }
+}
+
+// Input validation middleware
+function validateInput(requiredFields: string[]) {
+  return (req: Request, res: Response, next: Function) => {
+    const missingFields = requiredFields.filter(field => !req.body[field]);
+    if (missingFields.length > 0) {
+      return res.status(400).json({ 
+        message: `Missing required fields: ${missingFields.join(', ')}` 
+      });
+    }
+    
+    // Sanitize inputs and prevent prototype pollution
+    const dangerousProps = ['__proto__', 'constructor', 'prototype'];
+    const sanitizedBody: Record<string, any> = Object.create(null);
+    
+    for (const field of Object.keys(req.body)) {
+      if (!dangerousProps.includes(field) && Object.prototype.hasOwnProperty.call(req.body, field)) {
+        const value = req.body[field];
+        sanitizedBody[field] = typeof value === 'string' ? value.trim() : value;
+      }
+    }
+    
+    req.body = sanitizedBody;
+    
+    next();
+  };
+}
+
+// Authentication middleware to protect routes
+async function requireAuth(req: Request, res: Response, next: Function): Promise<void> {
+  const sessionId = req.headers.authorization?.replace('Bearer ', '');
+  const userId = sessionId ? await getUserIdFromSession(sessionId) : null;
+  
+  if (!userId) {
+    res.status(401).json({ message: "Authentication required" });
+    return;
+  }
+  
+  // Fetch and attach full user object to request
+  try {
+    const user = await storage.getUserById(userId);
+    if (!user) {
+      res.status(401).json({ message: "User not found" });
+      return;
+    }
+    
+    (req as any).userId = userId;
+    (req as any).user = user;
+    next();
+  } catch (error) {
+    logger.error('Error fetching user in requireAuth', { error, userId });
+    res.status(500).json({ message: "Authentication error" });
+  }
+}
+
+// Input validation middleware for password reset routes
+const validateRequest = (req: Request, res: Response, next: any) => {
+  const ip = req.ip || req.connection.remoteAddress || 'unknown';
+  const userAgent = req.get('User-Agent') || 'unknown';
+  
+  // Log the request for monitoring
+  logger.info(`Request validation`, { 
+    method: req.method, 
+    path: req.path, 
+    ip, 
+    userAgent 
+  });
+  
+  next();
+};
+
+// Error handling middleware
+function handleRouteError(error: any, req: Request, res: Response, operation: string): void {
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  logger.error(`${operation} failed:`, { error: errorMessage, path: req.path, method: req.method });
+  
+  // Don't expose internal errors in production
+  const message = process.env.NODE_ENV === 'production' 
+    ? "An error occurred. Please try again later."
+    : errorMessage;
+    
+  res.status(500).json({ message });
+}
+
+// Helper function to calculate string similarity
+function calculateSimilarity(str1: string, str2: string): number {
+  const longer = str1.length > str2.length ? str1 : str2;
+  const shorter = str1.length > str2.length ? str2 : str1;
+  
+  if (longer.length === 0) {
+    return 1.0;
+  }
+  
+  const editDistance = levenshteinDistance(longer, shorter);
+  return (longer.length - editDistance) / longer.length;
+}
+
+// Levenshtein distance algorithm
+function levenshteinDistance(str1: string, str2: string): number {
+  const matrix = [];
+  
+  for (let i = 0; i <= str2.length; i++) {
+    matrix[i] = [i];
+  }
+  
+  for (let j = 0; j <= str1.length; j++) {
+    matrix[0][j] = j;
+  }
+  
+  for (let i = 1; i <= str2.length; i++) {
+    for (let j = 1; j <= str1.length; j++) {
+      if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j] + 1
+        );
+      }
+    }
+  }
+  
+  return matrix[str2.length][str1.length];
+}
+
+// Advanced voice pattern matching for trained users
+function checkVoicePatternMatch(input: string, trainingData: any): boolean {
+  const { samples, commonWords, averageLength } = trainingData;
+  
+  // Check if input matches any of the training samples with high similarity
+  for (const sample of samples) {
+    const similarity = calculateSimilarity(sample, input);
+    if (similarity >= 0.85) { // Higher threshold for trained voices
+      return true;
+    }
+  }
+  
+  // Check for common word patterns
+  const inputWords = input.split(' ');
+  const matchingWords = inputWords.filter(word => commonWords.includes(word));
+  const wordMatchRatio = matchingWords.length / inputWords.length;
+  
+  // Length similarity check
+  const lengthSimilarity = 1 - Math.abs(input.length - averageLength) / Math.max(input.length, averageLength);
+  
+  // Combined scoring: word pattern + length similarity
+  const combinedScore = (wordMatchRatio * 0.7) + (lengthSimilarity * 0.3);
+  
+  return combinedScore >= 0.75; // 75% combined match threshold
+}
+
+// Cleanup expired shared tasks periodically
+setInterval(async () => {
+  try {
+    const now = new Date();
+    
+    // Delete expired shared tasks from database
+    const result = await db.delete(sharedTasksTable)
+      .where(lt(sharedTasksTable.expiresAt, now));
+    
+    const rowCount = result.rowCount || 0;
+    if (rowCount > 0) {
+      logger.info(`Deleted ${rowCount} expired shared tasks`);
+    }
+  } catch (error) {
+    logger.error('Error cleaning up expired shared tasks', { error });
+  }
+}, 60 * 60 * 1000); // Check every hour
+
+export async function registerRoutes(app: Express): Promise<Server> {
+  // Serve bookmarklet page and loader script for AIDomo extension
+  app.get('/bookmarklet.html', (req, res) => {
+    res.sendFile(path.join(process.cwd(), 'client/public/bookmarklet.html'));
+  });
+  
+  app.get('/aidomo-loader.js', (req, res) => {
+    res.setHeader('Content-Type', 'application/javascript');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.sendFile(path.join(process.cwd(), 'client/public/aidomo-loader.js'));
+  });
+
+  // Apply calendar rescheduling endpoint
+  app.post('/api/calendar/apply-rescheduling', requireAuth, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const { changes } = req.body;
+      
+      if (!changes || !Array.isArray(changes)) {
+        return res.status(400).json({ error: 'Invalid rescheduling changes' });
+      }
+      
+      // Apply the rescheduling changes
+      const updatedTasks = await storage.applyRescheduling(userId, changes);
+      
+      res.json({ 
+        success: true, 
+        updatedTasks,
+        message: `Successfully rescheduled ${updatedTasks.length} event(s).`
+      });
+    } catch (error) {
+      console.error('Error applying rescheduling:', error);
+      res.status(500).json({ error: 'Failed to apply rescheduling' });
+    }
+  });
+  
+  // Health check endpoint for deployment verification - actually tests database
+  app.get('/api/health', async (req, res) => {
+    const startTime = Date.now();
+    let dbStatus = 'unknown';
+    let dbLatency = 0;
+    
+    try {
+      // Actually test database connection with a simple query
+      const dbStart = Date.now();
+      await storage.healthCheck();
+      dbLatency = Date.now() - dbStart;
+      dbStatus = 'connected';
+    } catch (error) {
+      dbStatus = 'disconnected';
+      logger.error('Health check database test failed', { error: error instanceof Error ? error.message : String(error) });
+    }
+    
+    const isHealthy = dbStatus === 'connected';
+    const statusCode = isHealthy ? 200 : 503;
+    
+    res.status(statusCode).json({
+      status: isHealthy ? 'healthy' : 'unhealthy',
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'unknown',
+      uptime: Math.round(process.uptime()),
+      version: '1.0.0',
+      database: {
+        status: dbStatus,
+        latencyMs: dbLatency
+      },
+      responseTimeMs: Date.now() - startTime
+    });
+  });
+
+  // Stripe pricing endpoint - fetch active products and prices
+  app.get("/api/pricing", async (req, res) => {
+    try {
+      const stripeKey = process.env.STRIPE_LIVE_SECRET_KEY || process.env.STRIPE_TEST_SECRET_KEY || process.env.STRIPE_SECRET_KEY;
+      if (!stripeKey) {
+        return res.status(500).json({ error: "Stripe secret key not configured" });
+      }
+      const stripe = new Stripe(stripeKey);
+      const prices = await stripe.prices.list({
+        active: true,
+        expand: ["data.product"],
+      });
+      res.json(prices.data);
+    } catch (err: any) {
+      logger.error('Error fetching Stripe pricing', { error: err.message });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Stripe checkout endpoint - create checkout session
+  app.post("/api/checkout", async (req, res) => {
+    try {
+      const stripeKey = process.env.STRIPE_LIVE_SECRET_KEY || process.env.STRIPE_TEST_SECRET_KEY || process.env.STRIPE_SECRET_KEY;
+      if (!stripeKey) {
+        return res.status(500).json({ error: "Stripe secret key not configured" });
+      }
+      const stripe = new Stripe(stripeKey);
+      const { priceId } = req.body;
+      const session = await stripe.checkout.sessions.create({
+        mode: "subscription",
+        line_items: [{ price: priceId, quantity: 1 }],
+        success_url: "https://aichecklist.io/success",
+        cancel_url: "https://aichecklist.io/pricing",
+      });
+      res.json({ url: session.url });
+    } catch (err: any) {
+      logger.error('Error creating Stripe checkout session', { error: err.message });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // PDF download endpoint with access control
+  app.get('/api/pdfs/:token', requireAuth, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const { token } = req.params;
+
+      // Validate token format
+      if (!token || !/^[a-f0-9]{64}$/.test(token)) {
+        return res.status(400).json({ message: 'Invalid download token' });
+      }
+
+      // Import PDF download manager
+      const { pdfDownloadManager } = await import('./pdfDownloadManager');
+
+      // Get PDF record and validate access
+      const pdfRecord = pdfDownloadManager.getPdfRecord(token, userId);
+
+      if (!pdfRecord) {
+        return res.status(404).json({ 
+          message: 'PDF not found or access denied. The file may have expired or you do not have permission to access it.' 
+        });
+      }
+
+      // Check if file exists
+      if (!fs.existsSync(pdfRecord.filePath)) {
+        logger.error('PDF file missing on disk', { token: token.substring(0, 8) + '...', filePath: pdfRecord.filePath });
+        return res.status(404).json({ message: 'PDF file not found' });
+      }
+
+      // Log the download
+      await secureAuditLogger.logSecureRequest(
+        userId,
+        `/api/pdfs/${token}`,
+        'GET',
+        'PDF_DOWNLOADED',
+        200,
+        req
+      );
+
+      // Set headers for PDF download
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${path.basename(pdfRecord.filePath)}"`);
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+
+      // Stream the file
+      const fileStream = fs.createReadStream(pdfRecord.filePath);
+      
+      fileStream.on('error', (error) => {
+        logger.error('Error streaming PDF file', { error, token: token.substring(0, 8) + '...' });
+        if (!res.headersSent) {
+          res.status(500).json({ message: 'Error downloading PDF' });
+        }
+      });
+
+      fileStream.on('end', () => {
+        // Mark as downloaded for cleanup
+        pdfDownloadManager.markAsDownloaded(token);
+        logger.info('PDF download completed', { token: token.substring(0, 8) + '...', userId });
+      });
+
+      fileStream.pipe(res);
+
+    } catch (error) {
+      logger.error('PDF download error', { error, token: req.params.token });
+      if (!res.headersSent) {
+        res.status(500).json({ message: 'An error occurred while downloading the PDF' });
+      }
+    }
+  });
+
+  // Initialize default templates on server start
+  await templateManager.initializeDefaultTemplates();
+  
+  // Add 7 new professional management templates
+  const professionalTemplates = [
+    {
+      name: "Hospital Administrator System",
+      description: "Ensure efficient healthcare delivery balancing patient safety, staffing, compliance, and financial performance with operational oversight and strategic planning",
+      category: "Operations & Management",
+      tags: ["healthcare", "hospital", "administrator", "patient-safety", "compliance", "medical", "leadership"],
+      tasks: [
+        // Daily Tasks
+        { title: "Review ER, inpatient, and outpatient census reports", category: "Work", priority: "High" as any, timer: 30 },
+        { title: "Handle urgent staff shortages or escalations", category: "Work", priority: "High" as any, timer: 45 },
+        { title: "Monitor patient satisfaction and complaints", category: "Work", priority: "High" as any, timer: 20 },
+        { title: "Ensure equipment and critical supplies are functional", category: "Work", priority: "High" as any, timer: 25 },
+        { title: "Approve urgent procurement or medication requests", category: "Work", priority: "Medium" as any, timer: 15 },
+        
+        // Weekly Tasks
+        { title: "Conduct leadership rounds with department heads", category: "Work", priority: "High" as any, timer: 120, scheduledDaysFromNow: 7 },
+        { title: "Review staff schedules and overtime costs", category: "Work", priority: "High" as any, timer: 60, scheduledDaysFromNow: 7 },
+        { title: "Audit hygiene, sanitation, and safety protocols", category: "Work", priority: "High" as any, timer: 90, scheduledDaysFromNow: 7 },
+        { title: "Chair staff or medical council meetings", category: "Work", priority: "High" as any, timer: 90, scheduledDaysFromNow: 7 },
+        { title: "Monitor insurance claims and billing accuracy", category: "Work", priority: "Medium" as any, timer: 45, scheduledDaysFromNow: 7 },
+        
+        // Monthly Tasks
+        { title: "Analyze quality and patient outcome reports", category: "Work", priority: "High" as any, timer: 120, scheduledDaysFromNow: 30 },
+        { title: "Present budget review with CFO and finance team", category: "Work", priority: "High" as any, timer: 90, scheduledDaysFromNow: 30 },
+        { title: "Submit compliance documentation to regulators", category: "Work", priority: "High" as any, timer: 180, scheduledDaysFromNow: 30 },
+        { title: "Host training workshops (emergency drills, safety refreshers)", category: "Work", priority: "High" as any, timer: 240, scheduledDaysFromNow: 30 },
+        { title: "Meet with donors and community health stakeholders", category: "Work", priority: "Medium" as any, timer: 120, scheduledDaysFromNow: 30 }
+      ]
+    },
+    {
+      name: "Travel & Tourism Manager System",
+      description: "Oversee bookings, partnerships, and customer experiences with vendor relations, seasonal packages, and emergency travel management",
+      category: "Operations & Management",
+      tags: ["travel", "tourism", "bookings", "hospitality", "vendors", "customer-service", "seasonal"],
+      tasks: [
+        // Daily Tasks
+        { title: "Confirm and review upcoming client itineraries", category: "Work", priority: "High" as any, timer: 30 },
+        { title: "Manage cancellations, rebookings, and emergencies", category: "Work", priority: "High" as any, timer: 45 },
+        { title: "Monitor exchange rates and global travel advisories", category: "Work", priority: "Medium" as any, timer: 15 },
+        { title: "Respond to customer inquiries and issues", category: "Work", priority: "High" as any, timer: 30 },
+        
+        // Weekly Tasks
+        { title: "Negotiate rates with airlines, hotels, and tour partners", category: "Work", priority: "High" as any, timer: 120, scheduledDaysFromNow: 7 },
+        { title: "Review and update promotional travel packages", category: "Work", priority: "Medium" as any, timer: 60, scheduledDaysFromNow: 7 },
+        { title: "Track emerging travel trends among clients", category: "Work", priority: "Medium" as any, timer: 30, scheduledDaysFromNow: 7 },
+        { title: "Train staff on destinations and policy changes", category: "Work", priority: "High" as any, timer: 90, scheduledDaysFromNow: 7 },
+        { title: "Run promotional campaigns on social and email", category: "Work", priority: "Medium" as any, timer: 45, scheduledDaysFromNow: 7 },
+        
+        // Monthly Tasks
+        { title: "Attend trade fairs and travel expos", category: "Work", priority: "High" as any, timer: 480, scheduledDaysFromNow: 30 },
+        { title: "Audit financial performance of travel packages", category: "Work", priority: "High" as any, timer: 90, scheduledDaysFromNow: 30 },
+        { title: "Refresh seasonal offers (holidays, summer/winter tours)", category: "Work", priority: "High" as any, timer: 120, scheduledDaysFromNow: 30 },
+        { title: "Track and analyze customer satisfaction surveys", category: "Work", priority: "Medium" as any, timer: 60, scheduledDaysFromNow: 30 },
+        { title: "Expand partnerships with local operators or guides", category: "Work", priority: "Medium" as any, timer: 90, scheduledDaysFromNow: 30 }
+      ]
+    },
+    {
+      name: "Esports Team Manager System",
+      description: "Balance player performance, sponsor relations, and event logistics while maximizing fan engagement and commercial opportunities in competitive gaming",
+      category: "Operations & Management",
+      tags: ["esports", "gaming", "team-management", "sponsors", "performance", "streaming", "competitive"],
+      tasks: [
+        // Daily Tasks
+        { title: "Confirm team practice and scrim schedule", category: "Work", priority: "High" as any, timer: 15 },
+        { title: "Monitor player well-being (diet, sleep, exercise)", category: "Work", priority: "High" as any, timer: 20 },
+        { title: "Review scrim results and game film (VODs)", category: "Work", priority: "High" as any, timer: 60 },
+        { title: "Respond to sponsor or media requests", category: "Work", priority: "Medium" as any, timer: 30 },
+        
+        // Weekly Tasks
+        { title: "Host strategic team/coaching sessions", category: "Work", priority: "High" as any, timer: 120, scheduledDaysFromNow: 7 },
+        { title: "Oversee social media and streaming content schedule", category: "Work", priority: "Medium" as any, timer: 45, scheduledDaysFromNow: 7 },
+        { title: "Track team fan engagement metrics", category: "Work", priority: "Medium" as any, timer: 30, scheduledDaysFromNow: 7 },
+        { title: "Review travel and tournament logistics", category: "Work", priority: "High" as any, timer: 60, scheduledDaysFromNow: 7 },
+        { title: "Scout competitors' strategies", category: "Work", priority: "Medium" as any, timer: 90, scheduledDaysFromNow: 7 },
+        
+        // Monthly Tasks
+        { title: "Manage sponsor reporting and deliverables", category: "Work", priority: "High" as any, timer: 120, scheduledDaysFromNow: 30 },
+        { title: "Review financials (salaries, prize pool, streaming income)", category: "Work", priority: "High" as any, timer: 90, scheduledDaysFromNow: 30 },
+        { title: "Negotiate new sponsorship contracts", category: "Work", priority: "High" as any, timer: 180, scheduledDaysFromNow: 30 },
+        { title: "Evaluate player performance and morale", category: "Work", priority: "High" as any, timer: 60, scheduledDaysFromNow: 30 },
+        { title: "Plan bootcamps or international scrims", category: "Work", priority: "Medium" as any, timer: 120, scheduledDaysFromNow: 30 }
+      ]
+    },
+    {
+      name: "Construction Project Manager System",
+      description: "Coordinate workers, subcontractors, materials, and schedules while ensuring safety, budget compliance, and quality standards throughout construction projects",
+      category: "Operations & Management",
+      tags: ["construction", "project-management", "safety", "subcontractors", "budget", "quality", "compliance"],
+      tasks: [
+        // Daily Tasks  
+        { title: "Inspect job site safety and progress", category: "Work", priority: "High" as any, timer: 45 },
+        { title: "Coordinate subcontractor activity and laborers", category: "Work", priority: "High" as any, timer: 30 },
+        { title: "Review daily material deliveries and usage", category: "Work", priority: "Medium" as any, timer: 20 },
+        { title: "Handle urgent compliance or hazard issues", category: "Work", priority: "High" as any, timer: 30 },
+        
+        // Weekly Tasks
+        { title: "Conduct site coordination meetings", category: "Work", priority: "High" as any, timer: 90, scheduledDaysFromNow: 7 },
+        { title: "Update project management software (e.g., Gantt chart)", category: "Work", priority: "High" as any, timer: 60, scheduledDaysFromNow: 7 },
+        { title: "Review labor costs and timesheets", category: "Work", priority: "Medium" as any, timer: 45, scheduledDaysFromNow: 7 },
+        { title: "Align project with architects/engineers on design changes", category: "Work", priority: "High" as any, timer: 90, scheduledDaysFromNow: 7 },
+        { title: "Submit progress reports to stakeholders/clients", category: "Work", priority: "High" as any, timer: 60, scheduledDaysFromNow: 7 },
+        
+        // Monthly Tasks
+        { title: "Compare budget vs. actual project costs", category: "Work", priority: "High" as any, timer: 120, scheduledDaysFromNow: 30 },
+        { title: "Forecast project completion timelines", category: "Work", priority: "High" as any, timer: 90, scheduledDaysFromNow: 30 },
+        { title: "Approve subcontractor payments and invoices", category: "Work", priority: "High" as any, timer: 60, scheduledDaysFromNow: 30 },
+        { title: "Inspect and sign off on completed phases", category: "Work", priority: "High" as any, timer: 120, scheduledDaysFromNow: 30 },
+        { title: "Prepare for upcoming large milestones", category: "Work", priority: "Medium" as any, timer: 90, scheduledDaysFromNow: 30 }
+      ]
+    },
+    {
+      name: "Strategic Shipping & Logistics Manager",
+      description: "Oversee goods in transit, carrier performance, and customs compliance while balancing efficiency, cost savings, and customer satisfaction",
+      category: "Operations & Management", 
+      tags: ["shipping", "logistics", "supply-chain", "customs", "carriers", "freight", "strategic"],
+      tasks: [
+        // Daily Tasks
+        { title: "Monitor shipment tracking and delivery updates", category: "Work", priority: "High" as any, timer: 30 },
+        { title: "Resolve customs and clearance issues", category: "Work", priority: "High" as any, timer: 45 },
+        { title: "Communicate with freight partners and drivers", category: "Work", priority: "Medium" as any, timer: 30 },
+        { title: "Handle urgent delivery requests from clients", category: "Work", priority: "High" as any, timer: 25 },
+        
+        // Weekly Tasks
+        { title: "Review carrier performance metrics (on-time rates, delays)", category: "Work", priority: "High" as any, timer: 60, scheduledDaysFromNow: 7 },
+        { title: "Audit compliance documentation for shipments", category: "Work", priority: "High" as any, timer: 90, scheduledDaysFromNow: 7 },
+        { title: "Negotiate and renegotiate shipping rates", category: "Work", priority: "High" as any, timer: 120, scheduledDaysFromNow: 7 },
+        { title: "Check warehouse inventory and space usage", category: "Work", priority: "Medium" as any, timer: 45, scheduledDaysFromNow: 7 },
+        { title: "Align logistics plans with sales/production", category: "Work", priority: "Medium" as any, timer: 60, scheduledDaysFromNow: 7 },
+        
+        // Monthly Tasks
+        { title: "Analyze logistics costs vs. budget targets", category: "Work", priority: "High" as any, timer: 120, scheduledDaysFromNow: 30 },
+        { title: "Renew or adjust freight/carrier contracts", category: "Work", priority: "High" as any, timer: 180, scheduledDaysFromNow: 30 },
+        { title: "Audit safety certifications and compliance", category: "Work", priority: "High" as any, timer: 90, scheduledDaysFromNow: 30 },
+        { title: "Update logistics software and ERP tools", category: "Work", priority: "Medium" as any, timer: 120, scheduledDaysFromNow: 30 },
+        { title: "Present KPI and performance reports to leadership", category: "Work", priority: "High" as any, timer: 60, scheduledDaysFromNow: 30 }
+      ]
+    },
+    {
+      name: "Event Organizer & Wedding Planner System",
+      description: "Manage guest experience, vendor relations, and flawless event execution with daily communication, vendor coordination, and budget management",
+      category: "Operations & Management",
+      tags: ["events", "weddings", "planning", "vendors", "guests", "coordination", "hospitality"],
+      tasks: [
+        // Daily Tasks
+        { title: "Confirm and respond to client/vendor communications", category: "Work", priority: "High" as any, timer: 45 },
+        { title: "Track guest list changes and RSVPs", category: "Work", priority: "Medium" as any, timer: 20 },
+        { title: "Manage urgent cancellations or rescheduling requests", category: "Work", priority: "High" as any, timer: 30 },
+        { title: "Review event logistics and on-site requirements", category: "Work", priority: "Medium" as any, timer: 25 },
+        
+        // Weekly Tasks
+        { title: "Conduct vendor check-ins (caterers, decorators, AV)", category: "Work", priority: "High" as any, timer: 90, scheduledDaysFromNow: 7 },
+        { title: "Schedule and run client progress meetings", category: "Work", priority: "High" as any, timer: 60, scheduledDaysFromNow: 7 },
+        { title: "Manage catering tastings and menu selections", category: "Work", priority: "Medium" as any, timer: 120, scheduledDaysFromNow: 7 },
+        { title: "Oversee rehearsal planning for weddings/events", category: "Work", priority: "High" as any, timer: 90, scheduledDaysFromNow: 7 },
+        { title: "Track design and décor production timelines", category: "Work", priority: "Medium" as any, timer: 45, scheduledDaysFromNow: 7 },
+        
+        // Monthly Tasks
+        { title: "Finalize contracts and vendor deposits", category: "Work", priority: "High" as any, timer: 120, scheduledDaysFromNow: 30 },
+        { title: "Update and monitor budget status", category: "Work", priority: "High" as any, timer: 60, scheduledDaysFromNow: 30 },
+        { title: "Host or attend promotional events and expos", category: "Work", priority: "Medium" as any, timer: 240, scheduledDaysFromNow: 30 },
+        { title: "Evaluate vendor performance and quality", category: "Work", priority: "Medium" as any, timer: 90, scheduledDaysFromNow: 30 },
+        { title: "Expand venue and supplier partnerships", category: "Work", priority: "Medium" as any, timer: 120, scheduledDaysFromNow: 30 }
+      ]
+    },
+    {
+      name: "Hotel & Hospitality Manager System",
+      description: "Ensure guest satisfaction, property upkeep, and profitable operations through daily service excellence and strategic revenue management",
+      category: "Operations & Management",
+      tags: ["hotel", "hospitality", "guest-service", "operations", "revenue", "property", "staff-management"],
+      tasks: [
+        // Daily Tasks
+        { title: "Monitor guest check-ins, check-outs, and VIP arrivals", category: "Work", priority: "High" as any, timer: 30 },
+        { title: "Review housekeeping schedules and room readiness", category: "Work", priority: "High" as any, timer: 20 },
+        { title: "Handle guest complaints and resolve issues immediately", category: "Work", priority: "High" as any, timer: 45 },
+        { title: "Oversee food & beverage service quality", category: "Work", priority: "Medium" as any, timer: 30 },
+        
+        // Weekly Tasks
+        { title: "Train and coach staff for service excellence", category: "Work", priority: "High" as any, timer: 120, scheduledDaysFromNow: 7 },
+        { title: "Review occupancy rates and forecast bookings", category: "Work", priority: "High" as any, timer: 45, scheduledDaysFromNow: 7 },
+        { title: "Audit housekeeping, inventory, and supplies", category: "Work", priority: "Medium" as any, timer: 90, scheduledDaysFromNow: 7 },
+        { title: "Track online guest reviews and respond where needed", category: "Work", priority: "Medium" as any, timer: 60, scheduledDaysFromNow: 7 },
+        { title: "Align promotions with sales/marketing", category: "Work", priority: "Medium" as any, timer: 45, scheduledDaysFromNow: 7 },
+        
+        // Monthly Tasks
+        { title: "Review property P&L and revenue growth", category: "Work", priority: "High" as any, timer: 120, scheduledDaysFromNow: 30 },
+        { title: "Update seasonal offers/packages", category: "Work", priority: "Medium" as any, timer: 90, scheduledDaysFromNow: 30 },
+        { title: "Inspect property maintenance and needed upgrades", category: "Work", priority: "High" as any, timer: 150, scheduledDaysFromNow: 30 },
+        { title: "Launch staff recognition or reward programs", category: "Work", priority: "Medium" as any, timer: 90, scheduledDaysFromNow: 30 },
+        { title: "Reassess competitive pricing strategies", category: "Work", priority: "High" as any, timer: 120, scheduledDaysFromNow: 30 }
+      ]
+    }
+  ];
+  
+  // All specialized templates successfully added - cleaning up temporary code
+  
+  // Community Template Submission API
+  app.post('/api/community-templates', async (req, res) => {
+    try {
+      const { name, description, category, tags, tasks, submittedByName, submittedByEmail, submittedByUserId } = req.body;
+      
+      // Create the community template
+      const [template] = await db.insert(communityTemplates).values({
+        name,
+        description, 
+        category,
+        tags: tags || [],
+        submittedByUserId,
+        submittedByName,
+        submittedByEmail,
+        status: 'pending'
+      }).returning();
+      
+      // Add tasks to the template
+      if (tasks && tasks.length > 0) {
+        const templateTasks = tasks.map((task: any, index: number) => ({
+          templateId: template.id,
+          title: task.title,
+          category: task.category,
+          priority: task.priority,
+          timer: task.timer,
+          scheduledDaysFromNow: task.scheduledDaysFromNow,
+          displayOrder: index
+        }));
+        
+        await db.insert(communityTemplateTasks).values(templateTasks);
+      }
+      
+      res.json({ success: true, templateId: template.id });
+    } catch (error) {
+      console.error('Error submitting community template:', error);
+      res.status(500).json({ error: 'Failed to submit template' });
+    }
+  });
+  
+  // Get community templates (approved only for regular users)
+  app.get('/api/community-templates', async (req, res) => {
+    try {
+      const templates = await db.select({
+        id: communityTemplates.id,
+        name: communityTemplates.name,
+        description: communityTemplates.description,
+        category: communityTemplates.category,
+        tags: communityTemplates.tags,
+        submittedByName: communityTemplates.submittedByName,
+        usageCount: communityTemplates.usageCount,
+        rating: communityTemplates.rating,
+        ratingCount: communityTemplates.ratingCount,
+        createdAt: communityTemplates.createdAt
+      })
+      .from(communityTemplates)
+      .where(eq(communityTemplates.status, 'approved'))
+      .orderBy(desc(communityTemplates.usageCount), desc(communityTemplates.rating));
+      
+      res.json(templates);
+    } catch (error) {
+      console.error('Error fetching community templates:', error);
+      res.status(500).json({ error: 'Failed to fetch templates' });
+    }
+  });
+  
+  // Get community template details with tasks
+  app.get('/api/community-templates/:id', async (req, res) => {
+    try {
+      const templateId = parseInt(req.params.id);
+      
+      const [template] = await db.select()
+        .from(communityTemplates)
+        .where(eq(communityTemplates.id, templateId));
+        
+      if (!template || template.status !== 'approved') {
+        return res.status(404).json({ error: 'Template not found' });
+      }
+      
+      const tasks = await db.select()
+        .from(communityTemplateTasks)
+        .where(eq(communityTemplateTasks.templateId, templateId))
+        .orderBy(communityTemplateTasks.displayOrder);
+        
+      res.json({ ...template, tasks });
+    } catch (error) {
+      console.error('Error fetching community template:', error);
+      res.status(500).json({ error: 'Failed to fetch template' });
+    }
+  });
+  
+  // Note: New templates can be added through the templateManager.addTemplates() method
+  // Templates are only added once and won't duplicate on server restart
+  // Serve uploaded audio files with proper MIME types
+  app.use('/attached_assets', express.static(path.resolve(import.meta.dirname, '..', 'attached_assets'), {
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('.wav')) {
+        res.setHeader('Content-Type', 'audio/wav');
+      } else if (filePath.endsWith('.mp3')) {
+        res.setHeader('Content-Type', 'audio/mpeg');
+      } else if (filePath.endsWith('.png')) {
+        res.setHeader('Content-Type', 'image/png');
+      } else if (filePath.endsWith('.jpg') || filePath.endsWith('.jpeg')) {
+        res.setHeader('Content-Type', 'image/jpeg');
+      }
+      res.setHeader('Cache-Control', 'public, max-age=31536000'); // Cache for 1 year
+    }
+  }));
+
+  // Configure trust proxy for cloud hosting environments
+  app.set('trust proxy', 1);
+
+  // Security middleware - comprehensive protection against XSS, phishing, and injection attacks
+  app.use(helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        styleSrc: process.env.NODE_ENV === 'development' 
+          ? ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://fonts.googleapis.com"] // Dev: Allow Vite hot reload
+          : ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"], // Prod: More restrictive
+        scriptSrc: process.env.NODE_ENV === 'development'
+          ? ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://va.vercel-scripts.com", "https://www.googletagmanager.com", "https://www.google-analytics.com", "https://js.stripe.com"] // Dev: Allow Vite + Stripe
+          : ["'self'", "'unsafe-inline'", "https://va.vercel-scripts.com", "https://www.googletagmanager.com", "https://www.google-analytics.com", "https://js.stripe.com"], // Prod: Allow GA + Stripe
+        imgSrc: ["'self'", "data:", "https:", "blob:"],
+        connectSrc: [
+          "'self'", 
+          "https://api.neverbounce.com", 
+          "https://api.openai.com", 
+          "https://api.anthropic.com",
+          "https://api.gemini.google.com",
+          "https://www.google-analytics.com",
+          "https://www.googletagmanager.com",
+          "https://api.trello.com",
+          "https://api.notion.com",
+          "https://api.stripe.com",
+          "https://*.stripe.com",
+          "wss:", // Allow WebSocket connections
+          process.env.NODE_ENV === 'development' ? "ws://localhost:*" : "" // Dev: Vite HMR
+        ].filter(Boolean),
+        fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
+        objectSrc: ["'none'"],
+        mediaSrc: ["'self'", "blob:"],
+        frameSrc: ["'self'", "https://streamable.com", "https://js.stripe.com", "https://*.stripe.com"], // Allow Streamable + Stripe embeds
+        frameAncestors: ["'none'"], // Prevent page from being embedded
+        formAction: ["'self'"], // Prevent form submissions to external sites
+      },
+    },
+    crossOriginEmbedderPolicy: false,
+    hsts: process.env.NODE_ENV === 'production' ? {
+      maxAge: 31536000, // 1 year
+      includeSubDomains: true,
+      preload: true
+    } : false,
+    referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+    noSniff: true, // Prevent MIME type sniffing
+    xssFilter: true, // Enable XSS filtering
+    originAgentCluster: true, // Prevent cross-origin attacks
+  }));
+
+  // CORS configuration
+  app.use(cors({
+    origin: process.env.NODE_ENV === 'production' 
+      ? ['https://aichecklist.io', 'https://www.aichecklist.io', 'https://aichecklist.com', 'https://www.aichecklist.com'] 
+      : ['http://localhost:5000', 'http://127.0.0.1:5000'],
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+  }));
+
+  // Rate limiting for authentication endpoints
+  const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: process.env.NODE_ENV === 'development' ? 50 : 10, // More lenient in dev but still protected
+    message: {
+      error: "Too many authentication attempts, please try again later."
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    // Never skip rate limiting for security
+  });
+
+  // Rate limiting for API endpoints
+  const apiLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: process.env.NODE_ENV === 'development' ? 1000 : 500, // Increased to handle rapid task interactions
+    message: {
+      error: "Too many API requests, please try again later."
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    // Skip rate limiting for HEAD requests (health checks) and task operations
+    skip: (req) => req.method === 'HEAD' || (req.path.startsWith('/api/tasks') && ['PATCH', 'GET'].includes(req.method))
+  });
+
+  // Apply rate limiting
+  app.use('/api/register', authLimiter);
+  app.use('/api/login', authLimiter);
+  app.use('/api/voice-biometric-login', authLimiter);
+  app.use('/api/', apiLimiter);
+
+  // Authentication Routes
+  app.post("/api/register", validateInput(['password', 'email']), async (req: Request, res: Response) => {
+    try {
+      const { email, password, firstName, lastName, voicePassword, voiceEnabled, termsAccepted, termsVersion, selectedPlan, preferredBillingCycle } = req.body;
+      
+      // Validate terms acceptance - REQUIRED for competitive use protection
+      if (!termsAccepted) {
+        return res.status(400).json({ 
+          message: "Terms of Service must be accepted to create an account. This includes competitive use restrictions." 
+        });
+      }
+      
+      // Check if email is already registered
+      const existingEmail = await storage.getUserByEmail(email);
+      if (existingEmail) {
+        return res.status(400).json({ message: "Email is already registered" });
+      }
+
+      // Auto-generate username from email
+      const emailPrefix = email.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
+      let username = emailPrefix;
+      let counter = 1;
+      
+      // Ensure username is unique by adding a counter if needed
+      while (await storage.getUserByUsername(username)) {
+        username = `${emailPrefix}${counter}`;
+        counter++;
+      }
+
+      // Hash the password before storing
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      // Get IP address and location info
+      const geoInfo = getGeoInfo(req);
+      
+      // Create new user (unverified) with terms acceptance
+      // Set subscription plan based on selected plan (trial for pro/team/enterprise)
+      // All paid plans get a 14-day trial
+      const validPaidPlans = ['pro', 'team', 'enterprise'];
+      const planType = validPaidPlans.includes(selectedPlan) ? selectedPlan : 'pro'; // Default to pro trial
+      const trialEndDate = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000); // All new users get trial
+      
+      const newUser = await storage.createUser({
+        username,
+        email: email,
+        password: hashedPassword,
+        firstName: firstName || null,
+        lastName: lastName || null,
+        voicePassword: voicePassword || null,
+        voiceEnabled: voiceEnabled || false,
+        emailVerifiedAt: null, // User starts unverified
+        termsAcceptedAt: new Date(),
+        termsVersion: termsVersion || 'v1.0',
+        subscriptionPlan: planType,
+        subscriptionStatus: 'trial', // All new users start with trial
+        trialEndsAt: trialEndDate,
+        preferredBillingCycle: preferredBillingCycle || 'monthly',
+        signupIpAddress: geoInfo.ip,
+        city: geoInfo.city || null,
+        state: geoInfo.region || null,
+        country: geoInfo.country || 'US'
+      });
+
+      logger.info(`New user registered: ${username}`, { userId: newUser.id, email: email });
+      
+      // Send verification email
+      const token = generateVerificationToken();
+      storeVerificationToken(token, email, newUser.id, username);
+      
+      const emailSent = await sendVerificationEmail(email, token, username);
+      if (emailSent) {
+        res.status(201).json({ 
+          message: "Registration successful! Please check your email to verify your account.",
+          requiresVerification: true,
+          email: email
+        });
+      } else {
+        logger.error(`Failed to send verification email to ${email}`);
+        res.status(500).json({ message: "Registration successful, but failed to send verification email. Please contact support." });
+      }
+    } catch (error) {
+      handleRouteError(error, req, res, "Registration");
+    }
+  });
+
+  // Email verification endpoint
+  app.get("/verify-email", async (req: Request, res: Response) => {
+    try {
+      const { token } = req.query;
+      
+      if (!token || typeof token !== 'string') {
+        return res.status(400).send(`
+          <html>
+            <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+              <h2 style="color: #dc3545;">Invalid Verification Link</h2>
+              <p>The verification link is invalid or malformed.</p>
+              <a href="/" style="color: #007bff;">Return to Login</a>
+            </body>
+          </html>
+        `);
+      }
+
+      const tokenData = getVerificationToken(token);
+      if (!tokenData) {
+        return res.status(400).send(`
+          <html>
+            <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+              <h2 style="color: #dc3545;">Verification Failed</h2>
+              <p>The verification link has expired or is invalid.</p>
+              <p>Please request a new verification email by registering again.</p>
+              <a href="/" style="color: #007bff;">Return to Login</a>
+            </body>
+          </html>
+        `);
+      }
+
+      // Mark email as verified
+      await storage.updateUserEmailVerification(tokenData.userId, new Date());
+      
+      // Remove the verification token
+      removeVerificationToken(token);
+      
+      logger.info(`Email verified for user: ${tokenData.username}`, { userId: tokenData.userId });
+
+      res.status(200).send(`
+        <html>
+          <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+            <h2 style="color: #28a745;">Email Verified Successfully!</h2>
+            <p>Your email address has been verified. You can now log in to your AIChecklist account.</p>
+            <a href="/" style="background-color: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px;">Go to Login</a>
+          </body>
+        </html>
+      `);
+    } catch (error) {
+      logger.error('Email verification error:', error);
+      res.status(500).send(`
+        <html>
+          <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+            <h2 style="color: #dc3545;">Verification Error</h2>
+            <p>An error occurred during verification. Please try again later.</p>
+            <a href="/" style="color: #007bff;">Return to Login</a>
+          </body>
+        </html>
+      `);
+    }
+  });
+
+  app.post("/api/login", validateInput(['email', 'password']), async (req: Request, res: Response) => {
+    try {
+      const { email, password, rememberMe } = req.body;
+      
+      const user = await storage.getUserByEmail(email);
+      if (!user) {
+        return res.status(401).json({ message: "Invalid credentials" });
+      }
+
+      // Check if password is hashed (bcrypt hashes start with $2a$ or $2b$)
+      const isPasswordHashed = user.password && (user.password.startsWith('$2a$') || user.password.startsWith('$2b$'));
+      
+      let isPasswordValid = false;
+      
+      if (isPasswordHashed) {
+        // Password is hashed - use bcrypt compare
+        isPasswordValid = await bcrypt.compare(password, user.password);
+      } else {
+        // Legacy plain text password - direct comparison
+        isPasswordValid = (password === user.password);
+        
+        // If valid, upgrade to hashed password for security
+        if (isPasswordValid) {
+          const hashedPassword = await bcrypt.hash(password, 10);
+          await storage.updateUser(user.id, { password: hashedPassword });
+          logger.info(`Upgraded password to hashed for user: ${user.username}`, { userId: user.id });
+        }
+      }
+      
+      if (!isPasswordValid) {
+        return res.status(401).json({ message: "Invalid credentials" });
+      }
+
+      logger.info(`User logged in: ${user.username}`, { userId: user.id, email: user.email, rememberMe: !!rememberMe });
+      
+      // Update last login timestamp
+      await storage.updateUserLastLogin(user.id);
+      
+      // Create session for the user
+      const sessionId = await createSession(user.id, !!rememberMe);
+      
+      // Return user data without sensitive information
+      // Include emailVerified flag so frontend can show reminder if needed
+      const { password: _, voicePassword: __, ...userResponse } = user;
+      res.json({ 
+        ...userResponse, 
+        sessionId,
+        emailVerified: !!user.emailVerifiedAt
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error(`Login failed: ${errorMessage}`);
+      res.status(500).json({ message: "Login failed" });
+    }
+  });
+
+  // Voice biometric login endpoint
+  app.post("/api/voice-biometric-login", async (req: Request, res: Response) => {
+    try {
+      const { email, voiceData, transcribedText, rememberMe } = req.body;
+      
+      if (!email || !voiceData) {
+        return res.status(400).json({ message: "Email and voice data are required" });
+      }
+
+      const user = await storage.getUserByEmail(email);
+      if (!user || !user.voicePrint || !user.voicePassword) {
+        logger.warn(`Voice biometric login attempt for user without voice setup: ${email}`);
+        return res.status(401).json({ message: "Voice authentication not set up" });
+      }
+
+      // First, verify the spoken content matches the stored voice password
+      if (transcribedText) {
+        const normalizedSpoken = transcribedText.trim().toLowerCase();
+        const normalizedStored = user.voicePassword.trim().toLowerCase();
+        
+        logger.info(`Voice content verification for user: ${user.username}`, { 
+          email: user.email,
+          expected: normalizedStored, 
+          received: normalizedSpoken 
+        });
+
+        // Check if the spoken text matches the stored voice password
+        const contentSimilarity = calculateSimilarity(normalizedStored, normalizedSpoken);
+        if (contentSimilarity < 0.8) { // 80% text similarity required
+          logger.warn(`Voice content mismatch for user: ${user.username}`, { 
+            expected: normalizedStored, 
+            received: normalizedSpoken, 
+            similarity: contentSimilarity 
+          });
+          return res.status(401).json({ message: "Voice password incorrect" });
+        }
+      }
+
+      // Then verify voice characteristics (biometric matching)
+      const capturedFeatures = processAudioBase64(voiceData);
+      const storedFeatures = JSON.parse(user.voiceFeatures || '{}') as VoiceFeatures;
+      
+      // Compare voice biometric features
+      const biometricSimilarity = compareVoiceFeatures(storedFeatures, capturedFeatures);
+      
+      logger.info(`Voice biometric authentication for user: ${user.username}`, { 
+        biometricSimilarity,
+        threshold: 0.6 // Lowered threshold since we now have content verification
+      });
+      
+      if (biometricSimilarity >= 0.6) { // 60% biometric similarity (lowered since we verify content)
+        logger.info(`Voice authentication successful for user: ${user.username}`, { rememberMe: !!rememberMe });
+        
+        // Create session for the user
+        const sessionId = await createSession(user.id, !!rememberMe);
+        
+        res.json({ 
+          message: "Voice authentication successful",
+          user: { id: user.id, username: user.username },
+          sessionId
+        });
+      } else {
+        logger.warn(`Voice biometric authentication failed for user: ${user.username}`, { biometricSimilarity });
+        res.status(401).json({ message: "Voice pattern does not match" });
+      }
+
+    } catch (error) {
+      logger.error("Voice biometric login error:", error);
+      res.status(500).json({ message: "Voice authentication error" });
+    }
+  });
+
+  // Simple email code authentication - Send login code
+  app.post("/api/auth/send-code", async (req: Request, res: Response) => {
+    try {
+      const { email } = req.body;
+      
+      if (!email) {
+        return res.status(400).json({ message: "Email is required" });
+      }
+      
+      // Generate 6-digit code
+      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      
+      // Check if user exists
+      const existingUser = await storage.getUserByEmail(email);
+      
+      // Create login code
+      await storage.createLoginCode(email, code, existingUser?.id);
+      
+      // Send code via email
+      const emailSent = await sendLoginCodeEmail(email, code);
+      
+      // DEVELOPMENT FALLBACK: Always log the code in development mode
+      // This ensures users can log in even if email delivery fails
+      if (process.env.NODE_ENV === 'development') {
+        logger.info(`╔════════════════════════════════════════╗`);
+        logger.info(`║  LOGIN CODE FOR: ${email.padEnd(20)} ║`);
+        logger.info(`║                                        ║`);
+        logger.info(`║  CODE: ${code}                    ║`);
+        logger.info(`║                                        ║`);
+        logger.info(`║  Expires in 10 minutes                 ║`);
+        logger.info(`╚════════════════════════════════════════╝`);
+      }
+      
+      if (emailSent) {
+        logger.info(`Login code sent to ${email}`);
+        res.json({ 
+          message: "Login code sent to your email",
+          exists: !!existingUser
+        });
+      } else {
+        logger.error(`Failed to send login code to ${email}`);
+        // In development, still allow login even if email fails since code is in logs
+        if (process.env.NODE_ENV === 'development') {
+          logger.warn(`Email delivery failed but code is available in server logs above`);
+          res.json({ 
+            message: "Login code sent to your email",
+            exists: !!existingUser
+          });
+        } else {
+          res.status(500).json({ message: "Failed to send login code. Please try again." });
+        }
+      }
+    } catch (error) {
+      logger.error("Error sending login code:", error);
+      
+      // In development, code was still logged above, so allow login to proceed
+      if (process.env.NODE_ENV === 'development') {
+        logger.warn(`Exception during login code send, but code is available in server logs above`);
+        res.json({ 
+          message: "Login code sent to your email",
+          exists: true
+        });
+      } else {
+        res.status(500).json({ message: "Failed to send login code" });
+      }
+    }
+  });
+
+  // Simple email code authentication - Verify code and log in (EXISTING USERS ONLY)
+  app.post("/api/auth/verify-code", async (req: Request, res: Response) => {
+    try {
+      const { email, code, rememberMe } = req.body;
+      
+      if (!email || !code) {
+        return res.status(400).json({ message: "Email and code are required" });
+      }
+      
+      // Verify the code (trim whitespace to handle user input issues)
+      const loginCode = await storage.verifyLoginCode(email, code.trim());
+      
+      if (!loginCode) {
+        return res.status(401).json({ message: "Invalid or expired code" });
+      }
+      
+      // Mark code as used
+      await storage.markLoginCodeAsUsed(loginCode.id);
+      
+      // SECURITY: Only allow login for existing users
+      if (!loginCode.userId) {
+        logger.warn(`Login attempt with valid code but no account: ${email}`);
+        return res.status(401).json({ 
+          message: "No account found with this email. Please sign up first.",
+          needsSignup: true
+        });
+      }
+      
+      const user = await storage.getUserById(loginCode.userId);
+      
+      if (!user) {
+        return res.status(500).json({ message: "Failed to authenticate user" });
+      }
+      
+      // Mark email as verified if not already
+      if (!user.emailVerifiedAt) {
+        await storage.updateUserEmailVerification(user.id, new Date());
+      }
+      
+      // Update last login timestamp
+      await storage.updateUserLastLogin(user.id);
+      
+      // Create session
+      const sessionId = await createSession(user.id, !!rememberMe);
+      
+      // Return user data without sensitive information
+      const { password: _, voicePassword: __, ...userResponse } = user;
+      
+      logger.info(`User logged in successfully: ${user.username}`, { userId: user.id, rememberMe: !!rememberMe });
+      
+      res.json({ 
+        message: "Login successful",
+        ...userResponse,
+        sessionId
+      });
+      
+    } catch (error) {
+      logger.error("Error verifying login code:", error);
+      res.status(500).json({ message: "Failed to verify login code" });
+    }
+  });
+
+  // REGISTRATION DISABLED - Removed per user request
+  // app.post("/api/auth/register-send-code", async (req: Request, res: Response) => {
+  //   Registration endpoint removed
+  // });
+
+  // app.post("/api/auth/verify-registration", async (req: Request, res: Response) => {
+  //   Registration endpoint removed
+  // });
+
+  // Voice biometric setup endpoint
+  app.post("/api/voice-biometric-setup", async (req: Request, res: Response) => {
+    try {
+      const { email, voiceData } = req.body;
+      
+      if (!email || !voiceData) {
+        return res.status(400).json({ message: "Email and voice data are required" });
+      }
+
+      const user = await storage.getUserByEmail(email);
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      // Extract voice features from recorded audio
+      const voiceFeatures = processAudioBase64(voiceData);
+      
+      // Store voice biometric data
+      await storage.updateVoiceBiometric(user.id, {
+        voicePrint: voiceData,
+        voiceFeatures: JSON.stringify(voiceFeatures)
+      });
+      
+      logger.info(`Voice biometric setup completed for user: ${user.username}`);
+      res.json({ message: "Voice biometric registered successfully" });
+
+    } catch (error) {
+      logger.error("Voice biometric setup error:", error);
+      res.status(500).json({ message: "Voice setup error" });
+    }
+  });
+
+  // Password reset request endpoint
+  app.post("/api/forgot-password", validateRequest, async (req: Request, res: Response) => {
+    try {
+      const { email } = req.body;
+      
+      if (!email) {
+        return res.status(400).json({ message: "Email is required" });
+      }
+      
+      const user = await storage.getUserByEmail(email);
+      if (!user) {
+        // Don't reveal if email exists or not for security
+        return res.json({ message: "Password reset email sent if account exists" });
+      }
+      
+      // Generate reset token
+      const resetToken = crypto.randomBytes(32).toString('hex');
+      const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+      
+      await storage.createPasswordResetToken(user.id, user.email || '', resetToken, expiresAt);
+      
+      // Send password reset email - use the request host to build the correct URL
+      const protocol = req.get('x-forwarded-proto') || req.protocol || 'https';
+      const host = req.get('host');
+      const resetUrl = `${protocol}://${host}/reset-password?token=${resetToken}`;
+      
+      try {
+        if (!user.email) {
+          throw new Error("User email is required for password reset");
+        }
+        
+        await sendEmail({
+          to: user.email,
+          from: process.env.FROM_EMAIL || 'noreply@aichecklist.io',
+          subject: 'AIChecklist Password Reset',
+          html: `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+              <h2 style="color: #333;">Password Reset Request</h2>
+              <p>Hello ${user.firstName || user.username},</p>
+              <p>You requested to reset your password for your AIChecklist account. Click the button below to create a new password:</p>
+              <div style="text-align: center; margin: 30px 0;">
+                <a href="${resetUrl}" style="background-color: #10b981; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold;">Reset Password</a>
+              </div>
+              <p>This link will expire in 24 hours.</p>
+              <p>If you didn't request this, you can safely ignore this email.</p>
+              <hr style="margin: 30px 0; border: none; border-top: 1px solid #eee;">
+              <p style="color: #666; font-size: 14px;">
+                Best regards,<br>
+                The AIChecklist Team<br>
+                eagletechsoftware
+              </p>
+            </div>
+          `
+        });
+        
+        logger.info("Password reset email sent", { userId: user.id, email: user.email });
+      } catch (emailError) {
+        logger.error("Failed to send password reset email:", emailError);
+        return res.status(500).json({ message: "Failed to send reset email" });
+      }
+      
+      res.json({ message: "Password reset email sent if account exists" });
+      
+    } catch (error) {
+      logger.error("Password reset request error:", error);
+      res.status(500).json({ message: "Password reset request failed" });
+    }
+  });
+
+  // Password reset endpoint
+  app.post("/api/reset-password", validateRequest, async (req: Request, res: Response) => {
+    try {
+      const { token, newPassword, email } = req.body;
+      
+      if (!token || !newPassword || !email) {
+        return res.status(400).json({ message: "Token, email, and new password are required" });
+      }
+      
+      if (newPassword.length < 8) {
+        return res.status(400).json({ message: "Password must be at least 8 characters long" });
+      }
+      
+      const resetToken = await storage.getPasswordResetToken(token);
+      if (!resetToken) {
+        return res.status(400).json({ message: "Invalid or expired reset token" });
+      }
+      
+      if (resetToken.isUsed) {
+        return res.status(400).json({ message: "Reset token has already been used" });
+      }
+      
+      if (new Date() > resetToken.expiresAt) {
+        return res.status(400).json({ message: "Reset token has expired" });
+      }
+      
+      // Validate that the email matches the token
+      if (resetToken.email !== email) {
+        return res.status(400).json({ message: "Invalid email for this reset token" });
+      }
+      
+      // Hash the new password
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      
+      // Update user password
+      await storage.updateUserPassword(resetToken.userId, hashedPassword);
+      
+      // Mark token as used
+      await storage.markPasswordResetTokenAsUsed(resetToken.id);
+      
+      logger.info("Password reset successful", { userId: resetToken.userId });
+      res.json({ message: "Password reset successful" });
+      
+    } catch (error) {
+      logger.error("Password reset error:", error);
+      res.status(500).json({ message: "Password reset failed" });
+    }
+  });
+
+  // Logout endpoint
+  app.post("/api/logout", async (req: Request, res: Response) => {
+    try {
+      const sessionId = req.headers.authorization?.replace('Bearer ', '');
+      if (sessionId) {
+        clearSession(sessionId);
+      }
+      logger.info("User logout request");
+      res.json({ message: "Logout successful" });
+    } catch (error) {
+      logger.error("Logout error:", error);
+      res.status(500).json({ message: "Logout failed" });
+    }
+  });
+
+  app.post("/api/voice-login", async (req: Request, res: Response) => {
+    try {
+      const { email, voicePassword, rememberMe } = req.body;
+      
+      const user = await storage.getUserByEmail(email);
+      if (!user || !user.voiceEnabled) {
+        return res.status(401).json({ message: "Voice authentication failed" });
+      }
+
+      // Normalize both passwords for comparison (trim whitespace and convert to lowercase)
+      const normalizedInput = voicePassword.trim().toLowerCase();
+      const normalizedStored = user.voicePassword?.trim().toLowerCase();
+      
+      logger.info(`Voice login attempt for user: ${email}`, { 
+        expected: normalizedStored, 
+        received: normalizedInput,
+        expectedLength: normalizedStored?.length,
+        receivedLength: normalizedInput.length,
+        exactMatch: normalizedStored === normalizedInput
+      });
+      
+      // Check for exact match first
+      if (normalizedStored === normalizedInput) {
+        logger.info(`Voice password exact match for user: ${email}`);
+      } else {
+        // If user has voice training data, use advanced matching
+        if (user.voiceTrainingData) {
+          const trainingData = JSON.parse(user.voiceTrainingData);
+          const isVoiceMatch = checkVoicePatternMatch(normalizedInput, trainingData);
+          
+          if (!isVoiceMatch) {
+            logger.warn(`Voice pattern mismatch for trained user: ${email}`, { 
+              expected: normalizedStored, 
+              received: normalizedInput 
+            });
+            return res.status(401).json({ message: "Voice authentication failed" });
+          }
+          logger.info(`Voice pattern match successful for user: ${email}`);
+        } else {
+          // Fallback to similarity matching for non-trained users
+          const similarity = calculateSimilarity(normalizedStored || '', normalizedInput);
+          logger.info(`Voice password similarity for user: ${email}`, { similarity });
+          
+          if (similarity < 0.6) { // 60% similarity threshold for more lenient matching
+            logger.warn(`Voice password similarity too low for user: ${email}`, { 
+              expected: normalizedStored, 
+              received: normalizedInput,
+              similarity 
+            });
+            return res.status(401).json({ message: "Voice authentication failed" });
+          }
+        }
+      }
+
+      logger.info(`User voice login successful: ${email}`, { userId: user.id, rememberMe: !!rememberMe });
+      
+      // Create session for the user
+      const sessionId = await createSession(user.id, !!rememberMe);
+      
+      // Return user data without sensitive information
+      const { password: _, voicePassword: __, ...userResponse } = user;
+      res.json({ ...userResponse, sessionId });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error(`Voice login failed: ${errorMessage}`);
+      res.status(500).json({ message: "Voice login failed" });
+    }
+  });
+
+  // Tasks Routes
+  app.get("/api/tasks", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      
+      // Get tasks for the specific user
+      const tasks = await storage.getAllTasks(userId);
+      logger.debug(`Retrieved tasks`, { count: tasks.length });
+      res.json(tasks);
+    } catch (error) {
+      logger.error("Failed to fetch tasks", { error });
+      res.status(500).json({ message: "Failed to fetch tasks" });
+    }
+  });
+
+  app.post("/api/tasks", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const task = req.body;
+      
+      // Basic validation
+      if (!task.title || typeof task.title !== 'string' || task.title.trim().length === 0) {
+        return res.status(400).json({ message: "Task title is required and must be a non-empty string" });
+      }
+      
+      // Validate category and priority
+      const validPriorities = ["Low", "Medium", "High"];
+      
+      // Category validation: allow any non-empty string (including custom categories)
+      if (!task.category || typeof task.category !== 'string' || task.category.trim().length === 0) {
+        task.category = "Other"; // Default to "Other" if missing
+      }
+      
+      // Priority validation: strict enum
+      if (!validPriorities.includes(task.priority)) {
+        return res.status(400).json({ message: "Invalid task priority" });
+      }
+      
+      // Content moderation: Block inappropriate video URLs
+      if (task.youtubeUrl) {
+        const moderationResult = moderateVideoContent(task.youtubeUrl, task.title);
+        if (moderationResult.isBlocked) {
+          logger.warn('Task creation blocked due to inappropriate video content', { 
+            userId, 
+            url: task.youtubeUrl, 
+            title: task.title,
+            reason: moderationResult.reason 
+          });
+          return res.status(400).json({ 
+            message: moderationResult.reason || "Video content is not permitted." 
+          });
+        }
+      }
+      
+      // Add userId to task
+      task.userId = userId;
+      
+      // Get user's timezone for proper time handling
+      let userTimezone = 'America/New_York'; // Default to Eastern Time
+      try {
+        const userPrefs = await storage.getUserPreferences(userId);
+        if (userPrefs && userPrefs.timezone) {
+          userTimezone = userPrefs.timezone;
+        }
+      } catch (error) {
+        logger.warn('Could not fetch user timezone, using default', { userId });
+      }
+      
+      // Production-ready DST-safe local time to UTC conversion using Luxon
+      function localToUTC(dateOnly: string, time: string, tz: string): Date {
+        const [year, month, day] = dateOnly.split("-").map(Number);
+        const [hour, minute] = time.split(":").map(Number);
+        
+        // Use Luxon to create a DateTime in the specified timezone
+        const localDateTime = DateTime.fromObject(
+          { year, month, day, hour, minute, second: 0, millisecond: 0 },
+          { zone: tz }
+        );
+        
+        // Check if the conversion was valid
+        if (!localDateTime.isValid) {
+          logger.error('Invalid local time conversion', {
+            dateOnly, time, tz,
+            invalidReason: localDateTime.invalidReason,
+            invalidExplanation: localDateTime.invalidExplanation
+          });
+          // Fallback: treat as UTC
+          return new Date(`${dateOnly}T${time}:00Z`);
+        }
+        
+        // Convert to UTC and return as native Date object
+        const utcDate = localDateTime.toUTC().toJSDate();
+        
+        logger.info('Luxon timezone conversion successful', {
+          input: `${dateOnly}T${time}`,
+          timezone: tz,
+          localDateTime: localDateTime.toISO(),
+          utcResult: utcDate.toISOString(),
+          offset: localDateTime.offset
+        });
+        
+        return utcDate;
+      }
+      
+      // Convert scheduledDate string to Date object if present
+      if (task.scheduledDate && typeof task.scheduledDate === 'string') {
+        // If scheduledTime is provided separately, reconstruct the date with correct time
+        if (task.scheduledTime && typeof task.scheduledTime === 'string') {
+          const [hours, minutes] = task.scheduledTime.split(':').map(Number);
+          if (!isNaN(hours) && !isNaN(minutes)) {
+            // Extract just the date part from the ISO string
+            const dateOnly = task.scheduledDate.split('T')[0];
+            
+            // Use DST-safe conversion
+            task.scheduledDate = localToUTC(dateOnly, task.scheduledTime, userTimezone);
+            
+            logger.info('Applied scheduledTime to task with DST-safe timezone conversion', {
+              taskTitle: task.title,
+              scheduledTime: task.scheduledTime,
+              userTimezone,
+              dateOnly,
+              inputLocalTime: `${dateOnly}T${task.scheduledTime}`,
+              resultingUTC: task.scheduledDate.toISOString(),
+              verifyTime: `${task.scheduledDate.getUTCHours()}:${String(task.scheduledDate.getUTCMinutes()).padStart(2, '0')} UTC`
+            });
+          }
+        } else {
+          // Parse the date as-is
+          task.scheduledDate = new Date(task.scheduledDate);
+          
+          logger.info('Processing scheduledDate without separate time', {
+            taskTitle: task.title,
+            providedDate: task.scheduledDate,
+            resultingDate: task.scheduledDate.toISOString()
+          });
+        }
+      }
+      
+      const createdTask = await storage.createTask(task);
+      
+      // Create reminder if task has a scheduled date
+      if (createdTask.scheduledDate) {
+        try {
+          const { notificationService } = await import('./notification-service');
+          await notificationService.createScheduledTaskReminder({
+            id: createdTask.id,
+            title: createdTask.title,
+            userId: createdTask.userId,
+            scheduledDate: new Date(createdTask.scheduledDate)
+          });
+          logger.info('Created reminder for scheduled task', { 
+            taskId: createdTask.id, 
+            scheduledDate: createdTask.scheduledDate 
+          });
+        } catch (reminderError) {
+          logger.error('Failed to create reminder for scheduled task', { 
+            taskId: createdTask.id, 
+            error: reminderError 
+          });
+          // Don't fail the task creation if reminder creation fails
+        }
+      }
+      
+      // Update user statistics for new task
+      try {
+        const userStats = await storage.getUserStats(userId);
+        const categoryUpdates: any = {};
+        
+        // Increment category-specific counter
+        switch (task.category) {
+          case "Work": categoryUpdates.workTasks = userStats.workTasks + 1; break;
+          case "Personal": categoryUpdates.personalTasks = userStats.personalTasks + 1; break;
+          case "Shopping": categoryUpdates.shoppingTasks = userStats.shoppingTasks + 1; break;
+          case "Health": categoryUpdates.healthTasks = userStats.healthTasks + 1; break;
+          case "Business": categoryUpdates.businessTasks = userStats.businessTasks + 1; break;
+          case "Other": categoryUpdates.otherTasks = userStats.otherTasks + 1; break;
+        }
+        
+        // Update total tasks count
+        await storage.updateUserStats(userId, {
+          totalTasks: userStats.totalTasks + 1,
+          ...categoryUpdates
+        });
+        
+        logger.info(`Updated user stats for new task`, { userId, category: task.category });
+      } catch (error) {
+        logger.error(`Failed to update user stats for new task`, { error, userId });
+        // Don't fail the request if stats update fails
+      }
+      
+      logger.info(`Task created successfully: ${createdTask.id}`, { taskTitle: createdTask.title, userId });
+      res.status(201).json(createdTask);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error(`Failed to create task: ${errorMessage}`);
+      res.status(500).json({ message: "Failed to create task", error: errorMessage });
+    }
+  });
+
+  // Bulk reorder tasks endpoint
+  app.patch("/api/tasks/reorder", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { taskOrders } = req.body; // Array of { id: string, displayOrder: number }
+      const userId = (req as any).userId;
+      
+      if (!Array.isArray(taskOrders)) {
+        return res.status(400).json({ message: "taskOrders must be an array" });
+      }
+      
+      logger.info(`Bulk task reorder request received`, { userId, taskCount: taskOrders.length });
+      
+      // Update all tasks in a single transaction
+      const updatePromises = taskOrders.map(async ({ id, displayOrder }) => {
+        // Verify task belongs to user first (now handled by getTask with userId)
+        const existingTask = await storage.getTask(id, userId);
+        if (!existingTask) {
+          throw new Error(`Task ${id} not found or access denied`);
+        }
+        return storage.updateTask(id, { displayOrder });
+      });
+      
+      await Promise.all(updatePromises);
+      
+      logger.info(`Task reorder completed successfully`, { userId, taskCount: taskOrders.length });
+      res.json({ message: "Tasks reordered successfully" });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error(`Failed to reorder tasks: ${errorMessage}`, { userId: (req as any).userId });
+      res.status(500).json({ message: "Failed to reorder tasks", error: errorMessage });
+    }
+  });
+
+  app.patch("/api/tasks/:id", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const updates = req.body;
+      const userId = (req as any).userId;
+      logger.info(`Task update request received for id: ${id}`, { updates });
+      
+      // Get the task before updating to check if it was completed (with user validation)
+      const existingTask = await storage.getTask(id, userId);
+      if (!existingTask) {
+        logger.warn(`Failed to update task - not found or access denied: ${id}`, { userId });
+        return res.status(404).json({ message: "Task not found" });
+      }
+      
+      // Check if task belongs to user
+      if (existingTask.userId !== userId) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      // Content moderation: Block inappropriate video URLs when updating
+      if (updates.youtubeUrl) {
+        const moderationResult = moderateVideoContent(updates.youtubeUrl, updates.title || existingTask.title);
+        if (moderationResult.isBlocked) {
+          logger.warn('Task update blocked due to inappropriate video content', { 
+            userId, 
+            taskId: id,
+            url: updates.youtubeUrl, 
+            title: updates.title || existingTask.title,
+            reason: moderationResult.reason 
+          });
+          return res.status(400).json({ 
+            message: moderationResult.reason || "Video content is not permitted." 
+          });
+        }
+      }
+      
+      // Special handling when completing a task: mark all checklist items as completed
+      let finalUpdates = { ...updates };
+      if (updates.completed === true && !existingTask.completed) {
+        // Task is being completed - mark all checklist items as completed
+        if (existingTask.checklistItems && existingTask.checklistItems.length > 0) {
+          const completedChecklistItems = existingTask.checklistItems.map(item => ({
+            ...item,
+            completed: true
+          }));
+          finalUpdates.checklistItems = completedChecklistItems;
+          logger.info(`Auto-completing ${completedChecklistItems.length} checklist items for completed task: ${id}`);
+        }
+      }
+      
+      const updatedTask = await storage.updateTask(id, finalUpdates);
+      
+      if (!updatedTask) {
+        logger.warn(`Failed to update task - not found: ${id}`);
+        return res.status(404).json({ message: "Task not found" });
+      }
+      
+      // If task was just completed, record achievement progress (non-blocking)
+      if (!existingTask.completed && updatedTask.completed) {
+        // Run achievement checking in the background without blocking the response
+        storage.recordTaskCompletion(userId, updatedTask).catch(achievementError => {
+          logger.error(`Failed to record task completion for achievements: ${achievementError}`);
+        });
+        logger.info(`Queued task completion for achievement checking: ${id}`);
+      }
+      
+      logger.info(`Task updated successfully: ${id}`, { taskTitle: updatedTask.title });
+      res.json(updatedTask);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error(`Failed to update task: ${errorMessage}`, { taskId: req.params.id });
+      res.status(500).json({ message: "Failed to update task", error: errorMessage });
+    }
+  });
+
+  // Update checklist items endpoint
+  app.patch("/api/tasks/:id/checklist", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const { checklistItems } = req.body;
+      const userId = (req as any).userId;
+      logger.info(`Checklist update request received for task: ${id}`);
+      
+      // Check if task exists and belongs to user
+      const existingTask = await storage.getTask(id, userId);
+      if (!existingTask) {
+        logger.warn(`Failed to update checklist - task not found or access denied: ${id}`, { userId });
+        return res.status(404).json({ message: "Task not found" });
+      }
+      
+      if (existingTask.userId !== userId) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      // Check if all checklist items are completed - if so, complete the main task too
+      let finalUpdates: any = { checklistItems };
+      if (checklistItems && checklistItems.length > 0) {
+        const allItemsCompleted = checklistItems.every((item: any) => item.completed === true);
+        if (allItemsCompleted && !existingTask.completed) {
+          finalUpdates.completed = true;
+          logger.info(`Auto-completing main task since all ${checklistItems.length} checklist items are completed: ${id}`);
+        }
+      }
+      
+      const updatedTask = await storage.updateTask(id, finalUpdates);
+      
+      if (!updatedTask) {
+        logger.warn(`Failed to update checklist: ${id}`);
+        return res.status(404).json({ message: "Task not found" });
+      }
+      
+      logger.info(`Checklist updated successfully for task: ${id}`);
+      res.json(updatedTask);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error(`Failed to update checklist: ${errorMessage}`, { taskId: req.params.id });
+      res.status(500).json({ message: "Failed to update checklist", error: errorMessage });
+    }
+  });
+
+  // Archive task endpoint
+  app.patch("/api/tasks/:id/archive", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const userId = (req as any).userId;
+      logger.info(`Task archive request received for id: ${id}`);
+      
+      // Check if task exists and belongs to user
+      const existingTask = await storage.getTask(id, userId);
+      if (!existingTask) {
+        logger.warn(`Failed to archive task - not found or access denied: ${id}`, { userId });
+        return res.status(404).json({ message: "Task not found" });
+      }
+      
+      if (existingTask.userId !== userId) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      if (!existingTask.completed) {
+        return res.status(400).json({ message: "Only completed tasks can be archived" });
+      }
+      
+      const success = await storage.archiveTask(id);
+      if (!success) {
+        logger.warn(`Failed to archive task: ${id}`);
+        return res.status(500).json({ message: "Failed to archive task" });
+      }
+      
+      logger.info(`Task archived successfully: ${id}`, { taskTitle: existingTask.title });
+      res.json({ message: "Task archived successfully" });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error(`Failed to archive task: ${errorMessage}`, { taskId: req.params.id });
+      res.status(500).json({ message: "Failed to archive task", error: errorMessage });
+    }
+  });
+
+  // Get archived tasks endpoint
+  app.get("/api/tasks/archived", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      logger.info(`Archived tasks request received for user: ${userId}`);
+      
+      const archivedTasks = await storage.getArchivedTasks(userId);
+      
+      logger.info(`Retrieved archived tasks successfully`, { 
+        count: archivedTasks.length, 
+        userId 
+      });
+      res.json(archivedTasks);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error(`Failed to get archived tasks: ${errorMessage}`, { userId: (req as any).userId });
+      res.status(500).json({ message: "Failed to get archived tasks", error: errorMessage });
+    }
+  });
+
+  app.delete("/api/tasks/:id", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const userId = (req as any).userId;
+      logger.info(`Task delete request received for id: ${id}`);
+      
+      // Check if task exists and belongs to user
+      const task = await storage.getTask(id, userId);
+      if (!task) {
+        logger.warn(`Failed to delete task - not found or access denied: ${id}`, { userId });
+        return res.status(404).json({ message: "Task not found" });
+      }
+      
+      // Check if task belongs to user
+      if (task.userId !== userId) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      // Attempt to delete the task
+      const success = await storage.deleteTask(id);
+      
+      if (!success) {
+        logger.error(`Failed to delete task despite it existing: ${id}`);
+        return res.status(500).json({ message: "Failed to delete task" });
+      }
+      
+      logger.info(`Task deleted successfully: ${id}`);
+      res.status(204).send();
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error(`Error deleting task: ${errorMessage}`, { taskId: req.params.id });
+      res.status(500).json({ message: "Failed to delete task", error: errorMessage });
+    }
+  });
+
+  // Task Sharing Routes
+  app.post("/api/tasks/:id/share", async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const { expirationHours = 24 } = req.body;
+      
+      // Find the task (public sharing doesn't require user validation)
+      const task = await storage.getTask(id);
+      if (!task) {
+        return res.status(404).json({ message: "Task not found" });
+      }
+      
+      // Create unique sharing ID
+      const shareId = uuidv4();
+      
+      // Calculate expiration time
+      const expiresAt = new Date();
+      expiresAt.setHours(expiresAt.getHours() + expirationHours);
+      
+      // Store shared task info in database
+      await db.insert(sharedTasksTable).values({
+        shareId,
+        taskId: id,
+        taskData: task,
+        expiresAt
+      });
+      
+      logger.info(`Task shared successfully`, { taskId: id, shareId });
+      
+      // Return sharing details
+      res.status(201).json({
+        shareId,
+        shareUrl: `${req.protocol}://${req.get('host')}/share/${shareId}`,
+        expiresAt
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to share task", { error: errorMessage });
+      res.status(500).json({ message: "Failed to share task" });
+    }
+  });
+  
+  // Get shared task by share ID
+  app.get("/api/share/:shareId", async (req: Request, res: Response) => {
+    try {
+      const { shareId } = req.params;
+      logger.debug(`Retrieving shared task`, { shareId, reqPath: req.path, reqUrl: req.url });
+      
+      // Get shared task from database
+      const [sharedTask] = await db.select()
+        .from(sharedTasksTable)
+        .where(eq(sharedTasksTable.shareId, shareId));
+      
+      if (!sharedTask) {
+        logger.warn(`Shared task not found`, { shareId, reqPath: req.path });
+        return res.status(404).json({ message: "Shared task not found or link has expired" });
+      }
+      
+      logger.debug(`Found shared task`, { shareId, taskData: JSON.stringify(sharedTask).substring(0, 100) });
+      
+      // Check if expired
+      const now = new Date();
+      if (sharedTask.expiresAt < now) {
+        // Delete expired shared task
+        await db.delete(sharedTasksTable)
+          .where(eq(sharedTasksTable.shareId, shareId));
+          
+        logger.warn(`Shared task link has expired`, { shareId });
+        return res.status(410).json({ message: "Shared task link has expired" });
+      }
+      
+      // Return the shared task
+      res.json({
+        task: sharedTask.taskData,
+        expiresAt: sharedTask.expiresAt
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to retrieve shared task", { error: errorMessage, shareId: req.params.shareId });
+      res.status(500).json({ message: "Failed to retrieve shared task" });
+    }
+  });
+  
+  // Import shared task
+  app.post("/api/share/:shareId/import", async (req: Request, res: Response) => {
+    try {
+      const { shareId } = req.params;
+      
+      // Get shared task from database
+      const [sharedTask] = await db.select()
+        .from(sharedTasksTable)
+        .where(eq(sharedTasksTable.shareId, shareId));
+      
+      if (!sharedTask) {
+        logger.warn(`Shared task not found for import`, { shareId });
+        return res.status(404).json({ message: "Shared task not found or link has expired" });
+      }
+      
+      // Check if expired
+      const now = new Date();
+      if (sharedTask.expiresAt < now) {
+        // Delete expired shared task
+        await db.delete(sharedTasksTable)
+          .where(eq(sharedTasksTable.shareId, shareId));
+          
+        logger.warn(`Shared task link has expired for import`, { shareId });
+        return res.status(410).json({ message: "Shared task link has expired" });
+      }
+      
+      // Create a new task based on the shared one
+      // Reset completion status and give it a new ID
+      const { id, ...taskDataWithoutId } = sharedTask.taskData;
+      const taskToImport = {
+        ...taskDataWithoutId,
+        completed: false
+      };
+      
+      // Create the new task
+      const createdTask = await storage.createTask(taskToImport);
+      
+      logger.info(`Shared task imported successfully`, { shareId, newTaskId: createdTask.id });
+      
+      res.status(201).json(createdTask);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to import shared task", { error: errorMessage, shareId: req.params.shareId });
+      res.status(500).json({ message: "Failed to import shared task" });
+    }
+  });
+
+  // Direct Task Sharing Routes
+  app.post("/api/tasks/:id/share-direct", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const { email, message } = req.body;
+      
+      const currentUserId = (req as any).userId;
+      
+      // Find the task and verify ownership
+      const task = await storage.getTask(id, currentUserId);
+      if (!task) {
+        return res.status(404).json({ message: "Task not found" });
+      }
+      
+      // Find the target user
+      const targetUser = await storage.getUserByUsernameOrEmail(email);
+      if (!targetUser) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      
+      // Don't allow sharing with yourself
+      if (targetUser.id === currentUserId) {
+        return res.status(400).json({ message: "Cannot share task with yourself" });
+      }
+      
+      // Create the direct share
+      const directShare = await storage.createDirectTaskShare({
+        taskId: id,
+        taskData: task,
+        sharedByUserId: currentUserId,
+        sharedWithUserId: targetUser.id,
+        sharedWithUsername: targetUser.username,
+      });
+      
+      logger.info(`Task shared directly with user`, { 
+        taskId: id, 
+        sharedWith: targetUser.username,
+        shareId: directShare.id 
+      });
+      
+      res.status(201).json({
+        message: `Task shared with ${targetUser.username}`,
+        shareId: directShare.id,
+        sharedWith: targetUser.username
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to share task directly", { error: errorMessage });
+      res.status(500).json({ message: "Failed to share task directly" });
+    }
+  });
+
+  // Get direct task shares for current user
+  app.get("/api/direct-shares", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const currentUserId = (req as any).userId;
+      
+      const shares = await storage.getDirectTaskSharesForUser(currentUserId);
+      res.json(shares);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to get direct task shares", { error: errorMessage });
+      res.status(500).json({ message: "Failed to get direct task shares" });
+    }
+  });
+
+  // Accept a direct task share
+  app.post("/api/direct-shares/:shareId/accept", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { shareId } = req.params;
+      const currentUserId = (req as any).userId;
+      
+      const success = await storage.acceptDirectTaskShare(parseInt(shareId), currentUserId);
+      
+      if (!success) {
+        return res.status(404).json({ message: "Direct share not found" });
+      }
+      
+      logger.info(`Direct task share accepted`, { shareId, userId: currentUserId });
+      res.json({ message: "Task share accepted" });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to accept direct task share", { error: errorMessage });
+      res.status(500).json({ message: "Failed to accept direct task share" });
+    }
+  });
+
+  // Import a direct task share
+  app.post("/api/direct-shares/:shareId/import", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { shareId } = req.params;
+      const currentUserId = (req as any).userId;
+      
+      const importedTask = await storage.importDirectTaskShare(parseInt(shareId), currentUserId);
+      
+      logger.info(`Direct task share imported`, { shareId, newTaskId: importedTask.id });
+      res.status(201).json(importedTask);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to import direct task share", { error: errorMessage });
+      res.status(500).json({ message: "Failed to import direct task share" });
+    }
+  });
+
+  // User Timer Preferences Routes
+  app.get("/api/user/timer-preferences", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const currentUserId = (req as any).userId;
+      const user = await storage.getUserById(currentUserId);
+      
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      
+      res.json({
+        timerSound: user.timerSound || "Gentle Bell",
+        alarmSound: user.alarmSound || "Gentle Bell",
+        timerEnabled: user.timerEnabled ?? true,
+        alarmEnabled: user.alarmEnabled ?? true
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to get timer preferences", { error: errorMessage });
+      res.status(500).json({ message: "Failed to get timer preferences" });
+    }
+  });
+
+  app.put("/api/user/timer-preferences", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const currentUserId = (req as any).userId;
+      const { timerSound, alarmSound, timerEnabled, alarmEnabled } = req.body;
+      
+      await storage.updateUserTimerPreferences(currentUserId, {
+        timerSound,
+        alarmSound,
+        timerEnabled,
+        alarmEnabled
+      });
+      
+      logger.info(`Timer preferences updated`, { 
+        userId: currentUserId, 
+        timerSound,
+        alarmSound, 
+        timerEnabled,
+        alarmEnabled
+      });
+      
+      res.json({ message: "Timer preferences updated" });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to update timer preferences", { error: errorMessage });
+      res.status(500).json({ message: "Failed to update timer preferences" });
+    }
+  });
+
+  // AI Task Parsing Route (Voice to Task)
+  app.post("/api/ai/parse-tasks", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const currentUserId = (req as any).userId;
+      const { transcript } = req.body;
+      
+      // Check if user has active trial or subscription for voice features
+      const user = await storage.getUserById(currentUserId);
+      if (user) {
+        const now = new Date();
+        const hasActiveSubscription = user.subscriptionStatus === 'active' || user.subscriptionStatus === 'paid';
+        const hasActiveTrial = user.subscriptionStatus === 'trial' && user.trialEndsAt && new Date(user.trialEndsAt) > now;
+        
+        if (!hasActiveSubscription && !hasActiveTrial) {
+          return res.status(403).json({ 
+            message: 'Voice task creation requires an active subscription or trial',
+            trialExpired: user.subscriptionStatus === 'trial'
+          });
+        }
+      }
+      
+      logger.info("Received task parsing request", { 
+        transcript, 
+        transcriptLength: transcript?.length || 0 
+      });
+      
+      if (!transcript || typeof transcript !== 'string') {
+        logger.warn("Invalid transcript provided for parsing", { transcript });
+        return res.status(400).json({ message: "Invalid transcript provided" });
+      }
+      
+      const tasks = await parseTasksFromTranscript(transcript);
+      
+      logger.info("Task parsing completed", { 
+        originalTranscript: transcript,
+        parsedTasks: tasks,
+        taskCount: tasks.length 
+      });
+      
+      res.json({ tasks });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to parse tasks from transcript", { 
+        error: errorMessage,
+        transcript: req.body.transcript 
+      });
+      res.status(500).json({ 
+        message: "Failed to parse tasks",
+        tasks: [req.body.transcript?.trim() || ""] // Fallback to original transcript
+      });
+    }
+  });
+
+  // AI Suggestions Routes
+  app.post("/api/ai/suggestions", async (req: Request, res: Response) => {
+    try {
+      const { tasks } = req.body;
+      const suggestions = await generateTaskSuggestions(tasks);
+      res.json(suggestions);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to generate AI suggestions", { error: errorMessage });
+      res.status(500).json({ 
+        message: "Failed to generate suggestions",
+        suggestions: [
+          "Review weekly metrics",
+          "Schedule team meeting",
+          "Update project documents"
+        ],
+        insights: [
+          "You're most productive between 9AM-11AM",
+          "Work tasks completed faster with timers",
+          "Consider 25min focus periods for better results"
+        ]
+      });
+    }
+  });
+
+  // AIDOMO Chat Route with Calendar Task Creation
+  app.post("/api/ai/chat", async (req: Request, res: Response) => {
+    try {
+      const { message, context, currentDate, selectedDate } = req.body;
+      
+      if (!message || typeof message !== 'string') {
+        return res.status(400).json({ message: "Message is required" });
+      }
+
+      logger.info('AIDOMO chat request', { 
+        messageLength: message.length, 
+        context: context || 'general',
+        currentDate,
+        selectedDate
+      });
+
+      const isCalendarContext = context === 'calendar_task_creator';
+      
+      let systemPrompt = `You are AIDOMO ✨, the friendly AI assistant for AIChecklist.io, an ADHD-friendly task management platform. 
+
+Your personality:
+- Helpful, encouraging, and understanding
+- ADHD-aware and neurodivergent-friendly
+- Use emojis sparingly but meaningfully
+- Keep responses concise but thorough
+- Always supportive and non-judgmental
+
+Your capabilities:
+- Help with task management and organization
+- Provide productivity tips for neurodivergent minds
+- Suggest ADHD-friendly strategies
+- Offer calendar and scheduling advice
+- Support work-life balance
+- Professional document and report generation
+- Share schedules with other AIChecklist users
+
+📤 SCHEDULE SHARING PROTOCOL:
+When users want to share their schedule or appointments with someone, you can help them share!
+
+SHARE SCHEDULE commands you can use:
+- When a user says something like "share my schedule with [username]" or "send this to [username]" or "share with [email]"
+- Extract the target username or email and permission level
+
+To share a schedule, output:
+SHARE_SCHEDULE: {"recipient": "username_or_email", "permission": "view|edit|full", "shareType": "full", "message": "optional message from you"}
+
+Permission levels:
+- "view" = View Only (can only see the schedule)
+- "edit" = Can Edit (can view and modify appointments)  
+- "full" = Full Access (complete control, can also share conversations)
+
+Examples:
+- "Share my calendar with john@email.com" → SHARE_SCHEDULE: {"recipient": "john@email.com", "permission": "view", "shareType": "full", "message": "Shared via AIDOMO"}
+- "Send my schedule to Sarah with edit access" → SHARE_SCHEDULE: {"recipient": "Sarah", "permission": "edit", "shareType": "full", "message": "Shared via AIDOMO"}
+- "Share this with Mike and let him see everything" → SHARE_SCHEDULE: {"recipient": "Mike", "permission": "full", "shareType": "full", "message": "Full access shared via AIDOMO"}
+
+Always confirm what you're sharing and with whom in your response.
+
+📝 DOCUMENT & REPORT GENERATION PROTOCOL:
+When users request reports, documents, proposals, or written content:
+
+**Step 1: Clarify if Needed**
+If the request is vague (e.g., "I need a report"), ask specific questions:
+- "What field or subject is this report about?"
+- "What's the main topic or position you'd like to cover?"
+- "Who is the intended audience?"
+- "What's the primary purpose or goal?"
+
+**Step 2: Generate Professional Documents**
+Once you have the topic, create well-formatted documents with:
+
+Structure:
+- Clear, descriptive title
+- Numbered main sections (1., 2., 3.)
+- Sub-sections with headers
+- Bullet points for lists
+- Professional paragraphs
+
+Formatting:
+- **Bold** headers and key terms
+- Numbered lists for sequential items
+- Bullet points (•) for related items
+- Clear spacing between sections
+- Examples and specifics included
+- Actionable recommendations
+
+Tone:
+- Professional and business-appropriate
+- Clear and direct language
+- Specific details over vague statements
+- Practical examples included
+- Scannable and well-organized
+
+Example Flow:
+User: "I need a report"
+AIDOMO: "I'd be happy to help create a professional report! ✨ To ensure I cover exactly what you need:
+• What field or subject is this about?
+• What's the main topic or focus?
+• Who will be reading this?"
+
+User: "Partnership structure for our JV"
+AIDOMO: [Generate formatted document with clear sections, numbered points, professional tone, examples]`;
+
+      if (isCalendarContext) {
+        systemPrompt += `
+
+🗓️ CALENDAR MODE ACTIVE:
+You can now CREATE TASKS directly in the user's calendar! When users ask for appointments, schedules, or tasks to be created, you MUST:
+
+1. Be very specific about what you're creating: "I'm creating a [task name] on [date] at [time]"
+2. Use concrete dates and times, not vague references
+3. Encourage them about their planning efforts
+4. Tell them exactly what to expect in their calendar
+
+Context: Calendar Task Creator
+Current Date: ${currentDate || 'Not specified'}
+Selected Date: ${selectedDate || 'Not specified'}
+
+IMPORTANT: When users request scheduling, be very explicit about the task details you're creating. For example:
+- "I'm creating a 'Team Meeting' task for September 6th at 4:00 PM"
+- "Adding 'Doctor Appointment' to your calendar for next Tuesday at 9:00 AM"
+
+Guidelines:
+- Always confirm the specific task name, date, and time you're creating
+- Be encouraging about their organization efforts
+- Keep responses under 250 words since you're also creating tasks`;
+      }
+
+      systemPrompt += `
+
+Context: ${context || 'general_assistant'}
+
+Guidelines:
+- Keep responses under 500 words
+- Use bullet points for clarity when helpful
+- Acknowledge ADHD challenges positively
+- Focus on practical, actionable advice
+- Be encouraging about progress, however small`;
+
+      // Try OpenAI first, fall back to Gemini if it fails (quota, network, etc.)
+      let aiResponse: string | null = null;
+      try {
+        // the newest OpenAI model is "gpt-4o" which was released May 13, 2024. do not change this unless explicitly requested by the user
+        const response = await openai.chat.completions.create({
+          model: 'gpt-4o',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: message }
+          ],
+          max_tokens: 800,
+          temperature: 0.7
+        });
+
+        aiResponse = response.choices[0].message.content;
+      } catch (openaiError) {
+        logger.warn('OpenAI failed for AIDOMO chat, attempting Gemini fallback', { 
+          error: openaiError instanceof Error ? openaiError.message : String(openaiError) 
+        });
+        
+        try {
+          // Fallback to Gemini (no JSON mode needed for chat responses)
+          aiResponse = await geminiCompletion(systemPrompt, message);
+          logger.info('Gemini fallback successful for AIDOMO chat');
+        } catch (geminiError) {
+          logger.error('Both OpenAI and Gemini failed for AIDOMO chat', { 
+            openaiError: openaiError instanceof Error ? openaiError.message : String(openaiError),
+            geminiError: geminiError instanceof Error ? geminiError.message : String(geminiError)
+          });
+          throw openaiError; // Throw original error to be caught by outer try-catch
+        }
+      }
+      
+      let tasksToCreate = [];
+
+      // If this is calendar context, try to extract task creation requests
+      if (isCalendarContext) {
+        try {
+          const taskExtractionPrompt = `You are a task extraction specialist. Analyze this user message and extract any tasks/appointments they want to create.
+
+User message: ${JSON.stringify(message)}
+Current date: ${currentDate}
+Selected date: ${selectedDate}
+
+IMPORTANT: If the user is asking for ANY scheduling, appointment creation, or task addition, you MUST extract it as a task.
+CRITICAL: If the user mentions MULTIPLE appointments/tasks in a single message, extract ALL of them into a single JSON array. Do NOT limit to just one task.
+
+For each task, provide:
+- title: The task/appointment name (be descriptive)
+- category: Work, Personal, Health, Shopping, or Business
+- priority: Low, Medium, or High
+- scheduledDate: ISO date string (use selectedDate if specified, otherwise infer from message or use currentDate)
+- scheduledTime: HH:MM format in 24-hour time (IMPORTANT: extract exact minutes if specified!)
+- timer: Number of minutes if mentioned, empty string otherwise
+- notes: Any additional details, descriptions, or context mentioned by the user (empty string if none)
+
+Parse times VERY carefully:
+- "3:55 PM" or "3:55pm" → "15:55" (NOT "15:00"!)
+- "3 PM" or "3pm" → "15:00"
+- "10:30 AM" or "10:30am" → "10:30"
+- "2:45 PM" → "14:45"
+- "noon" or "12pm" → "12:00"
+- "midnight" → "00:00"
+- If only hour is mentioned (like "3pm"), use :00 minutes
+- If minutes are specified (like "3:55"), MUST preserve exact minutes
+
+Parse dates intelligently:
+- "tomorrow" = day after currentDate
+- "next Friday" = next occurrence of Friday
+- "September 6th" or "Sept 6" = 2025-09-06
+- "the 6th" or "6th" = 6th of current month (September 2025) = 2025-09-06
+- "the 5th" or "5th" = 5th of current month (September 2025) = 2025-09-05
+- "Friday at 4pm" = next Friday at 16:00
+- When only a day number is given (like "6th" or "the 6th"), assume current month (September 2025)
+
+Examples that MUST create tasks:
+- "Schedule a meeting tomorrow at 2pm" → [{"title":"Meeting","category":"Work","priority":"Medium","scheduledDate":"2025-09-05","scheduledTime":"14:00","timer":"","notes":""}]
+- "Appointment at 3:55 PM tomorrow with Dr. Smith to discuss test results" → [{"title":"Appointment","category":"Personal","priority":"Medium","scheduledDate":"2025-09-05","scheduledTime":"15:55","timer":"","notes":"with Dr. Smith to discuss test results"}]
+- "Doctor visit Sept 6th at 10:30am for annual checkup" → [{"title":"Doctor visit","category":"Health","priority":"High","scheduledDate":"2025-09-06","scheduledTime":"10:30","timer":"","notes":"annual checkup"}]
+- "Put a scheduled event September 6th at 4 PM" → [{"title":"Scheduled Event","category":"Work","priority":"Medium","scheduledDate":"2025-09-06","scheduledTime":"16:00","timer":"","notes":""}]
+- "Meeting at 2:45 PM to review Q4 strategy" → [{"title":"Meeting","category":"Work","priority":"Medium","scheduledDate":"2025-09-04","scheduledTime":"14:45","timer":"","notes":"to review Q4 strategy"}]
+- "Add doctor appointment next Tuesday, bring insurance card" → [{"title":"Doctor Appointment","category":"Health","priority":"High","scheduledDate":"2025-09-10","scheduledTime":"09:00","timer":"","notes":"bring insurance card"}]
+- "Schedule 3 meetings: Team standup tomorrow at 9am, client call Sept 6 at 2:30pm with Acme Corp, and project review Friday at 4pm" → [{"title":"Team standup","category":"Work","priority":"Medium","scheduledDate":"2025-09-05","scheduledTime":"09:00","timer":"","notes":""},{"title":"Client call","category":"Work","priority":"High","scheduledDate":"2025-09-06","scheduledTime":"14:30","timer":"","notes":"with Acme Corp"},{"title":"Project review","category":"Work","priority":"Medium","scheduledDate":"2025-09-12","scheduledTime":"16:00","timer":"","notes":""}]
+
+Return ONLY valid JSON array, no explanations or other text.`;
+
+          let taskContent: string | null | undefined = null;
+          
+          // Try OpenAI first for task extraction, fall back to Gemini
+          try {
+            const taskResponse = await openai.chat.completions.create({
+              model: 'gpt-4o',
+              messages: [
+                { role: 'system', content: taskExtractionPrompt },
+                { role: 'user', content: message }
+              ],
+              max_tokens: 1000,
+              temperature: 0.1
+            });
+
+            taskContent = taskResponse.choices[0].message.content?.trim();
+          } catch (taskExtractionOpenAIError) {
+            logger.warn('OpenAI failed for task extraction, attempting Gemini fallback', { 
+              error: taskExtractionOpenAIError instanceof Error ? taskExtractionOpenAIError.message : String(taskExtractionOpenAIError) 
+            });
+            
+            try {
+              // Fallback to Gemini for task extraction (JSON mode enabled)
+              taskContent = await geminiCompletion(taskExtractionPrompt, message, { jsonMode: true });
+              logger.info('Gemini fallback successful for task extraction');
+            } catch (taskExtractionGeminiError) {
+              logger.error('Both OpenAI and Gemini failed for task extraction', { 
+                openaiError: taskExtractionOpenAIError instanceof Error ? taskExtractionOpenAIError.message : String(taskExtractionOpenAIError),
+                geminiError: taskExtractionGeminiError instanceof Error ? taskExtractionGeminiError.message : String(taskExtractionGeminiError)
+              });
+              // Continue without task extraction
+            }
+          }
+          logger.info('Raw task extraction response', { 
+            content: taskContent,
+            messageLength: message.length,
+            originalMessage: message 
+          });
+          
+          if (taskContent) {
+            // Try to find JSON in the response even if it doesn't start with [
+            let jsonStart = taskContent.indexOf('[');
+            let jsonEnd = taskContent.lastIndexOf(']');
+            
+            if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
+              const jsonStr = taskContent.substring(jsonStart, jsonEnd + 1);
+              // Use safe JSON parsing with fallback
+              const parsedTasks = safeJSONParse(jsonStr, []);
+              
+              // Validate that we got an array
+              if (!Array.isArray(parsedTasks)) {
+                logger.warn('AI returned non-array tasks, using empty array');
+                tasksToCreate = [];
+              } else {
+                // Validate each task has required structure and valid field types
+                tasksToCreate = parsedTasks.filter(task => {
+                  if (!task || typeof task !== 'object') {
+                    logger.warn('Skipping non-object task', { task });
+                    return false;
+                  }
+                  
+                  // Required: title must be non-empty string
+                  if (!task.title || typeof task.title !== 'string' || task.title.trim() === '') {
+                    logger.warn('Skipping task without valid title', { task });
+                    return false;
+                  }
+                  
+                  // Optional: validate types when present
+                  if (task.category !== undefined && typeof task.category !== 'string') {
+                    logger.warn('Skipping task with invalid category type', { task });
+                    return false;
+                  }
+                  
+                  if (task.priority !== undefined && typeof task.priority !== 'string') {
+                    logger.warn('Skipping task with invalid priority type', { task });
+                    return false;
+                  }
+                  
+                  if (task.scheduledDate !== undefined && typeof task.scheduledDate !== 'string') {
+                    logger.warn('Skipping task with invalid scheduledDate type', { task });
+                    return false;
+                  }
+                  
+                  // Timer can be: number, empty string "", or undefined
+                  if (task.timer !== undefined && task.timer !== "" && typeof task.timer !== 'number') {
+                    logger.warn('Skipping task with invalid timer type', { task });
+                    return false;
+                  }
+                  
+                  return true;
+                });
+                
+                if (tasksToCreate.length > 0) {
+                  logger.info('Successfully extracted and validated tasks for creation', { 
+                    taskCount: tasksToCreate.length,
+                    tasks: tasksToCreate.map(t => ({ title: t.title, category: t.category, scheduledDate: t.scheduledDate }))
+                  });
+                } else if (parsedTasks.length > 0) {
+                  logger.warn('All parsed tasks failed validation', { parsedTasks });
+                }
+              }
+            } else {
+              logger.warn('No valid JSON array found in task extraction response', { 
+                content: taskContent 
+              });
+            }
+          }
+        } catch (error) {
+          logger.error('Failed to extract tasks from message', { 
+            error: error.message,
+            stack: error.stack,
+            message: message 
+          });
+          // Continue without task creation
+        }
+      }
+      
+      logger.info('AIDOMO chat response generated', { 
+        responseLength: aiResponse?.length || 0,
+        model: 'gpt-4o',
+        tasksExtracted: tasksToCreate.length
+      });
+
+      res.json({ 
+        response: aiResponse,
+        tasks: tasksToCreate
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("AIDOMO chat error", { error: errorMessage });
+      
+      res.status(500).json({ 
+        response: "I'm having trouble connecting right now, but I'm here to help! ✨ Try asking me about:\n\n• Task prioritization strategies\n• ADHD-friendly productivity tips\n• Calendar organization ideas\n• Breaking down overwhelming projects\n\nWhat would you like help with today?",
+        tasks: []
+      });
+    }
+  });
+
+  // Logs Routes (for admin purposes)
+  app.get("/api/logs", async (req: Request, res: Response) => {
+    try {
+      // Only allow access to logs in development mode
+      if (process.env.NODE_ENV !== 'development') {
+        return res.status(403).json({ message: "Logs access not allowed in production" });
+      }
+      
+      const lines = req.query.lines ? parseInt(req.query.lines as string) : 100;
+      const logs = logger.getAppLogs(lines);
+      res.json({ logs });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch logs" });
+    }
+  });
+
+  app.get("/api/logs/errors", async (req: Request, res: Response) => {
+    try {
+      // Only allow access to logs in development mode
+      if (process.env.NODE_ENV !== 'development') {
+        return res.status(403).json({ message: "Logs access not allowed in production" });
+      }
+      
+      const lines = req.query.lines ? parseInt(req.query.lines as string) : 100;
+      const allLogs = logger.getErrorLogs(lines);
+      
+      // Filter logs to only show errors from the last hour
+      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+      const recentLogs = allLogs ? allLogs.split('\n').filter(log => {
+        if (!log.trim()) return false;
+        
+        // Extract timestamp from log line (format: [2025-08-09 02:32:30])
+        const timestampMatch = log.match(/\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]/);
+        if (!timestampMatch) return false;
+        
+        const logTime = new Date(timestampMatch[1]);
+        return logTime > oneHourAgo;
+      }).join('\n') : '';
+      
+      res.json({ logs: recentLogs });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch error logs" });
+    }
+  });
+
+  app.post("/api/logs/flush-all", async (req: Request, res: Response) => {
+    try {
+      // Only allow in development mode
+      if (process.env.NODE_ENV !== 'development') {
+        return res.status(403).json({ message: "Logs flush not allowed in production" });
+      }
+      
+      logger.info('Flushing all system logs via logger interface');
+      
+      // Use logger's internal flush method if available, or just log that we're clearing
+      if (typeof (logger as any).flush === 'function') {
+        (logger as any).flush();
+      }
+      
+      // Clear the error buffer by calling the logger's clear method if available
+      if (typeof (logger as any).clearErrorBuffer === 'function') {
+        (logger as any).clearErrorBuffer();
+      }
+      
+      logger.info('All system logs flushed - system status reset to clean');
+      
+      res.json({ 
+        message: "All logs flushed successfully",
+        status: "clean",
+        timestamp: new Date().toISOString()
+      });
+    } catch (error) {
+      logger.error('Failed to flush logs', { error });
+      res.status(500).json({ message: "Failed to flush logs", details: error instanceof Error ? error.message : String(error) });
+    }
+  });
+  
+  // User Settings Routes
+  app.get("/api/user/settings", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const user = await storage.getCustomerById(userId);
+      
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      
+      res.json(toUserSettings(user));
+    } catch (error) {
+      logger.error("Failed to get user settings", { error, userId: (req as any).userId });
+      res.status(500).json({ message: "Failed to get user settings" });
+    }
+  });
+
+  app.patch("/api/user/settings", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      
+      // Use the mapper to convert and validate
+      const updateData = toUserUpdate(req.body);
+
+      const [updatedUser] = await db.update(users)
+        .set(updateData)
+        .where(eq(users.id, userId))
+        .returning();
+      
+      if (!updatedUser) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      
+      logger.info(`User settings updated: ${userId}`, { updates: Object.keys(req.body) });
+      
+      res.json(toUserSettings(updatedUser));
+    } catch (error) {
+      // Check if it's a validation error from the mapper
+      if (error instanceof Error && error.message.includes("Invalid autoArchiveHours")) {
+        return res.status(400).json({ message: error.message });
+      }
+      
+      logger.error("Failed to update user settings", { error, userId: (req as any).userId });
+      res.status(500).json({ message: "Failed to update user settings" });
+    }
+  });
+
+  // Admin authentication middleware for sensitive routes
+  const requireAdminAuth = async (req: Request, res: Response, next: Function) => {
+    const sessionId = req.headers.authorization?.replace('Bearer ', '');
+    const userId = sessionId ? await getUserIdFromSession(sessionId) : null;
+    
+    if (!userId || typeof userId !== 'number') {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+    
+    // Get user and check if they have admin privileges (admin or founder)
+    try {
+      const user = await storage.getCustomerById(userId);
+      if (!user || (user.customerType !== 'admin' && user.customerType !== 'founder')) {
+        logger.warn(`Unauthorized admin access attempt`, { userId, path: req.path });
+        return res.status(403).json({ message: "Admin access required" });
+      }
+      
+      (req as any).userId = userId;
+      (req as any).user = user;
+      next();
+    } catch (error) {
+      logger.error(`Admin auth error`, { error, userId });
+      return res.status(500).json({ message: "Authentication error" });
+    }
+  };
+
+  // Admin access verification endpoint
+  app.post("/api/admin/verify-access", requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const { password } = req.body;
+      
+      // Check if password matches environment variable
+      const adminPassword = process.env.ADMIN_ACCESS_PASSWORD;
+      if (!adminPassword) {
+        logger.error("Admin access password not configured in environment variables");
+        return res.status(500).json({ message: "Server configuration error" });
+      }
+      
+      if (password !== adminPassword) {
+        logger.warn(`Admin access denied - incorrect password`, { userId: (req as any).userId });
+        return res.status(401).json({ message: "Incorrect password" });
+      }
+      
+      logger.info(`Admin access granted for API management`, { userId: (req as any).userId });
+      res.status(200).json({ message: "Access granted" });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Admin access verification failed", { error: errorMessage });
+      res.status(500).json({ message: "Verification failed" });
+    }
+  });
+
+  // API Keys Management Routes - PROTECTED with admin authentication
+  app.get("/api/admin/keys", requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      logger.info(`Admin accessing API keys`, { userId: (req as any).userId });
+      await getApiKeys(req, res);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to retrieve API keys", { error: errorMessage });
+      res.status(500).json({ message: "Failed to retrieve API keys" });
+    }
+  });
+  
+  app.post("/api/admin/keys", requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      logger.info(`Admin updating API keys`, { userId: (req as any).userId });
+      await saveApiKey(req, res);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to save API key", { error: errorMessage });
+      res.status(500).json({ message: "Failed to save API key" });
+    }
+  });
+
+  // Admin: Run Archive Settings Migration
+  app.post("/api/admin/migrations/backfill-archive", requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const migrationName = 'backfill-archive-settings-v1';
+      
+      logger.info(`[MIGRATION] Admin initiated archive settings backfill`, { adminUserId: userId });
+
+      // Check if migration has already been run successfully
+      const [existingMigration] = await db.select()
+        .from(systemMigrations)
+        .where(eq(systemMigrations.name, migrationName))
+        .limit(1);
+
+      if (existingMigration && existingMigration.status === 'success') {
+        logger.warn(`[MIGRATION] Migration already completed, refusing rerun`, {
+          migrationName,
+          completedAt: existingMigration.runAt,
+          metadata: existingMigration.metadata
+        });
+        return res.status(400).json({
+          message: 'Migration already completed successfully',
+          completedAt: existingMigration.runAt,
+          metadata: existingMigration.metadata
+        });
+      }
+
+      // Mark migration as running
+      await db.insert(systemMigrations)
+        .values({
+          name: migrationName,
+          runAt: new Date(),
+          status: 'running',
+          metadata: {}
+        })
+        .onConflictDoUpdate({
+          target: systemMigrations.name,
+          set: {
+            status: 'running',
+            runAt: new Date()
+          }
+        });
+
+      // Run the migration
+      const { backfillArchiveSettings } = await import('./migrations/backfill-archive-settings');
+      const result = await backfillArchiveSettings();
+
+      // Mark migration as successful
+      await db.update(systemMigrations)
+        .set({
+          status: 'success',
+          metadata: result,
+          errorMessage: null
+        })
+        .where(eq(systemMigrations.name, migrationName));
+
+      logger.info(`[MIGRATION] Archive settings backfill completed successfully`, {
+        adminUserId: userId,
+        result
+      });
+
+      res.status(200).json({
+        message: 'Migration completed successfully',
+        ...result
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorStack = error instanceof Error ? error.stack : undefined;
+      
+      // Mark migration as failed
+      try {
+        await db.update(systemMigrations)
+          .set({
+            status: 'failed',
+            errorMessage: errorMessage
+          })
+          .where(eq(systemMigrations.name, 'backfill-archive-settings-v1'));
+      } catch (updateError) {
+        logger.error(`[MIGRATION] Failed to update migration status`, { updateError });
+      }
+
+      logger.error(`[MIGRATION] Archive settings backfill failed`, {
+        error: errorMessage,
+        stack: errorStack
+      });
+      res.status(500).json({ message: "Migration failed", error: errorMessage });
+    }
+  });
+  
+  // Recurring Tasks Routes
+  app.post("/api/recurring-tasks", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const {
+        title,
+        category,
+        priority,
+        recurringFrequency,
+        recurringInterval,
+        nextDueDate,
+        endDate,
+        daysOfWeek,
+        dayOfMonth,
+        monthOfYear
+      } = req.body;
+      
+      // Create the recurring task
+      const task = await storage.createRecurringTask({
+        title,
+        category,
+        priority,
+        completed: false,
+        timer: null,
+        youtubeUrl: null,
+        displayOrder: 0,
+        scheduledDate: null,
+        userId: (req as any).userId || 1, // Default to user 1 if not authenticated
+        isRecurring: true,
+        recurringFrequency,
+        recurringInterval,
+        nextDueDate: nextDueDate ? new Date(nextDueDate) : new Date(),
+        endDate: endDate ? new Date(endDate) : null,
+        daysOfWeek,
+        dayOfMonth,
+        monthOfYear,
+        parentTaskId: null,
+        // Archive fields
+        archived: false,
+        archivedAt: null,
+        completedAt: null,
+        checklistItems: []
+      });
+      
+      logger.info(`Created recurring task: ${task.id}`, { 
+        taskTitle: task.title,
+        frequency: recurringFrequency,
+        interval: recurringInterval
+      });
+      
+      res.status(201).json(task);
+    } catch (error) {
+      logger.error("Failed to create recurring task", { error });
+      res.status(500).json({ message: "Failed to create recurring task" });
+    }
+  });
+  
+  // Get all child tasks for a recurring task
+  app.get("/api/recurring-tasks/:id/instances", async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      
+      // Check if parent task exists
+      const parentTask = await storage.getTask(id);
+      if (!parentTask || !parentTask.isRecurring) {
+        return res.status(404).json({ message: "Recurring task not found" });
+      }
+      
+      // Get child tasks
+      const childTasks = await storage.getChildTasks(id);
+      
+      res.status(200).json(childTasks);
+    } catch (error) {
+      logger.error("Failed to fetch recurring task instances", { error });
+      res.status(500).json({ message: "Failed to fetch recurring task instances" });
+    }
+  });
+  
+  // Get download counter (public endpoint) - persists and climbs over time
+  app.get("/api/stats/downloads", async (req: Request, res: Response) => {
+    try {
+      let downloadStat = await storage.getAppStatistic('downloads');
+      
+      if (!downloadStat) {
+        // Initialize to 1.5 million if not exists
+        downloadStat = await storage.setAppStatistic('downloads', 1500000);
+      } else if (downloadStat.currentValue < 1500000) {
+        // Upgrade existing counter to 1.5 million minimum
+        downloadStat = await storage.setAppStatistic('downloads', 1500000);
+      }
+      
+      // Increment by 1-3 on each request to simulate organic growth
+      const increment = Math.floor(Math.random() * 3) + 1;
+      const updatedStat = await storage.incrementAppStatistic('downloads', increment);
+      
+      res.json({ downloads: updatedStat.currentValue });
+    } catch (error) {
+      logger.error("Failed to get download counter", { error });
+      res.status(500).json({ message: "Failed to get download counter" });
+    }
+  });
+
+  // Process due recurring tasks (can be called manually or by a scheduled job)
+  app.post("/api/recurring-tasks/process", async (req: Request, res: Response) => {
+    try {
+      await storage.processRecurringTasks();
+      res.status(200).json({ message: "Recurring tasks processed successfully" });
+    } catch (error) {
+      logger.error("Failed to process recurring tasks", { error });
+      res.status(500).json({ message: "Failed to process recurring tasks" });
+    }
+  });
+
+  // Achievement Routes
+  app.get("/api/achievements", async (req: Request, res: Response) => {
+    try {
+      const achievements = await storage.getAllAchievements();
+      res.json(achievements);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to get achievements", { error: errorMessage });
+      res.status(500).json({ message: "Failed to get achievements" });
+    }
+  });
+
+  app.get("/api/user/achievements", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const currentUserId = (req as any).userId;
+      
+      const userAchievements = await storage.getUserAchievements(currentUserId);
+      res.json(userAchievements);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to get user achievements", { error: errorMessage });
+      res.status(500).json({ message: "Failed to get user achievements" });
+    }
+  });
+
+  app.get("/api/user/stats", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const currentUserId = (req as any).userId;
+      
+      const userStats = await storage.getUserStats(currentUserId);
+      res.json(userStats);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to get user stats", { error: errorMessage });
+      res.status(500).json({ message: "Failed to get user stats" });
+    }
+  });
+
+
+  
+  app.post("/api/domoai/analyze-tasks", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      
+      // Check if API key is configured
+      if (!process.env.GEMINI_API_KEY) {
+        return res.status(503).json({ 
+          message: "AI service not configured. Please add GEMINI_API_KEY to enable this feature." 
+        });
+      }
+      
+      const tasks = await storage.getAllTasks(userId);
+      const analysis = await analyzeTaskPatterns(tasks);
+      res.json({ analysis });
+    } catch (error) {
+      logger.error("Task analysis error:", error);
+      res.status(500).json({ message: "Failed to analyze tasks" });
+    }
+  });
+  
+  app.get("/api/domoai/suggestions", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      
+      // Check if API key is configured
+      if (!process.env.GEMINI_API_KEY) {
+        return res.status(503).json({ 
+          message: "AI service not configured. Please add GEMINI_API_KEY to enable this feature." 
+        });
+      }
+      
+      const tasks = await storage.getAllTasks(userId);
+      const recentTasks = tasks.slice(0, 10); // Get last 10 tasks
+      const suggestions = await generateTaskSuggestions(recentTasks);
+      res.json({ suggestions });
+    } catch (error) {
+      logger.error("Task suggestion error:", error);
+      res.status(500).json({ message: "Failed to generate suggestions" });
+    }
+  });
+  
+  app.get("/api/domoai/productivity-tips", requireAuth, async (req: Request, res: Response) => {
+    try {
+      // Check if API key is configured
+      if (!process.env.GEMINI_API_KEY) {
+        return res.status(503).json({ 
+          message: "AI service not configured. Please add GEMINI_API_KEY to enable this feature." 
+        });
+      }
+      
+      const tips = await getProductivityTips();
+      res.json({ tips });
+    } catch (error) {
+      logger.error("Productivity tips error:", error);
+      res.status(500).json({ message: "Failed to get productivity tips" });
+    }
+  });
+
+  // Superhuman Mode storage (in-memory, per user)
+  const superhumanModes = new Map<number, 'adhd' | 'normal'>();
+  
+  // DomoAI Chat Routes - New OpenAI-powered chat system with comprehensive security
+  app.post("/api/domoai/chat", 
+    requireAuth, 
+    createSecureDomoAIMiddleware(), 
+    createAuditCompletionMiddleware(),
+    async (req: Request, res: Response) => {
+    try {
+      console.log('[DOMOAI ENTRY] Route handler entered');
+      const { messages, userMemory, timezone } = req.body;
+      const userId = (req as any).userId;
+      console.log('[DOMOAI ENTRY] userId:', userId, 'messages:', messages?.length);
+      
+      // Superhuman Mode Detection
+      const lastMessage = messages && messages.length > 0 ? messages[messages.length - 1] : null;
+      const userInput = lastMessage?.content?.trim().toUpperCase() || '';
+      
+      // Check for mode commands
+      if (userInput === 'ADHD') {
+        superhumanModes.set(userId, 'adhd');
+        return res.json({
+          response: "🧠⚡ Superhuman Mode Engaged\n\nFrom now on, I'll respond with:\n• Clear structure\n• Short chunks\n• Priority labels\n• Fast next steps\n\nSay your next request.",
+          uiEvent: "superhuman_on",
+          mode: "adhd"
+        });
+      }
+      
+      if (userInput === 'NORMAL' || userInput === 'OFF') {
+        superhumanModes.set(userId, 'normal');
+        return res.json({
+          response: "🧠 Superhuman Mode Disengaged\n\nStandard response style is back on.",
+          uiEvent: "superhuman_off",
+          mode: "normal"
+        });
+      }
+      
+      // One-shot ADHD mode: "ADHD: <question>"
+      let isOneShotADHD = false;
+      let actualInput = lastMessage?.content || '';
+      if (userInput.startsWith('ADHD:')) {
+        isOneShotADHD = true;
+        actualInput = lastMessage?.content.substring(5).trim();
+        // Modify the last message for processing
+        if (messages && messages.length > 0) {
+          messages[messages.length - 1] = { ...messages[messages.length - 1], content: actualInput };
+        }
+      }
+      
+      // Get current mode (one-shot overrides stored mode)
+      const currentMode = isOneShotADHD ? 'adhd' : (superhumanModes.get(userId) || 'normal');
+      
+      // Store mode in request for DomoAI to use
+      (req as any).superhumanMode = currentMode;
+      
+      // Trial/Subscription enforcement for AIDOMO
+      const user = await storage.getUserById(userId);
+      if (user) {
+        const now = new Date();
+        const subscriptionStatus = user.subscriptionStatus;
+        const trialEndsAt = user.trialEndsAt ? new Date(user.trialEndsAt) : null;
+        
+        // Check if user has active subscription
+        const hasActiveSubscription = subscriptionStatus === 'active' || subscriptionStatus === 'paid';
+        
+        // Check if user is in active trial
+        const hasActiveTrial = subscriptionStatus === 'trial' && trialEndsAt && trialEndsAt > now;
+        
+        // If neither active subscription nor active trial, enforce 2-response limit
+        if (!hasActiveSubscription && !hasActiveTrial) {
+          const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+          const lastUsageDate = user.aidomoLastUsageDate;
+          let dailyCount = user.aidomoDailyUsageCount || 0;
+          
+          // Reset count if it's a new day and persist the reset immediately
+          if (lastUsageDate !== today) {
+            dailyCount = 0;
+            // Persist the reset to avoid stale data issues
+            try {
+              await storage.updateUser(userId, {
+                aidomoDailyUsageCount: 0,
+                aidomoLastUsageDate: today
+              });
+              logger.info('AIDOMO daily usage reset', { userId, date: today });
+            } catch (resetError) {
+              logger.error('Failed to reset AIDOMO daily usage', { error: resetError });
+            }
+          }
+          
+          // Allow 2 responses per day for expired trials
+          const TRIAL_EXPIRED_DAILY_LIMIT = 2;
+          if (dailyCount >= TRIAL_EXPIRED_DAILY_LIMIT) {
+            logger.info('AIDOMO trial limit reached', { userId, dailyCount, limit: TRIAL_EXPIRED_DAILY_LIMIT });
+            return res.status(402).json({
+              message: "You've reached your daily AIDOMO limit. Upgrade to Premium for unlimited AI assistance!",
+              trialExpired: true,
+              upgradeRequired: true,
+              dailyLimit: TRIAL_EXPIRED_DAILY_LIMIT,
+              usageCount: dailyCount
+            });
+          }
+          
+          // Increment usage count immediately (before AI call to prevent bypass via failed requests)
+          const newCount = dailyCount + 1;
+          try {
+            await storage.updateUser(userId, {
+              aidomoDailyUsageCount: newCount,
+              aidomoLastUsageDate: today
+            });
+            logger.info('AIDOMO usage counted', { userId, count: newCount, date: today });
+          } catch (trackError) {
+            logger.error('Failed to track AIDOMO usage', { error: trackError });
+          }
+        }
+      }
+
+      if (!messages || !Array.isArray(messages)) {
+        await secureAuditLogger.logSecureRequest(
+          userId,
+          '/api/domoai/chat',
+          'POST',
+          'INVALID_REQUEST_FORMAT',
+          400,
+          req,
+          'VALIDATION_ERROR'
+        );
+        return res.status(400).json({ message: "Messages array is required" });
+      }
+      
+      // Store timezone in request for task creation
+      (req as any).userTimezone = timezone || 'America/New_York';
+
+      // Log the start of the request (without sensitive data)
+      await secureAuditLogger.logSecureRequest(
+        userId,
+        '/api/domoai/chat',
+        'POST',
+        { messageCount: messages.length, timestamp: new Date() },
+        200,
+        req
+      );
+
+      // ENHANCED SECURITY: Multi-layer validation
+      const userAgent = req.headers['user-agent'] || '';
+      const referer = req.headers['referer'] || '';
+      
+      // Strict origin validation
+      const allowedDomains = [req.hostname, 'aichecklist.com', 'localhost'];
+      if (referer && !allowedDomains.some(domain => referer.includes(domain))) {
+        await secureAuditLogger.logSecureRequest(
+          userId,
+          '/api/domoai/chat',
+          'POST',
+          'INVALID_ORIGIN_BLOCKED',
+          403,
+          req,
+          'SECURITY_VIOLATION'
+        );
+        
+        logger.warn(`DomoAI unauthorized cross-origin access blocked`, { 
+          userId, 
+          referer, 
+          userAgent,
+          timestamp: new Date()
+        });
+        
+        return res.status(403).json({ 
+          message: "Access denied: Cross-origin requests not allowed",
+          support: "Please access DomoAI directly from the AICHECKLIST application"
+        });
+      }
+
+      // Enhanced suspicious pattern detection - more specific to avoid false positives
+      const messageText = messages.map(m => m.content).join(' ').toLowerCase();
+      const suspiciousPatterns = [
+        // Data access attempts (specific phrases only)
+        'show me user data', 'list all users', 'give me passwords', 'database dump',
+        'bypass security', 'export all data', 'show other users',
+        'customer database', 'dump database',
+        
+        // Injection attempts (specific patterns)
+        'drop table', 'delete from users', 'union select', 
+        '<script>', 'javascript:', 'eval(',
+        
+        // System access (specific phrases)
+        'root access', 'sudo command', 'system password', 
+        'bypass authentication', 'hack into'
+      ];
+      
+      const detectedPattern = suspiciousPatterns.find(pattern => messageText.includes(pattern));
+      if (detectedPattern) {
+        await secureAuditLogger.logSecureRequest(
+          userId,
+          '/api/domoai/chat',
+          'POST',
+          `SUSPICIOUS_PATTERN_DETECTED: ${detectedPattern}`,
+          403,
+          req,
+          'SECURITY_VIOLATION'
+        );
+        
+        logger.warn(`DomoAI security violation detected`, { 
+          userId, 
+          pattern: detectedPattern,
+          messagePreview: messageText.substring(0, 50),
+          timestamp: new Date()
+        });
+        
+        return res.status(403).json({ 
+          message: "I can only help with your personal tasks and productivity. I don't have access to system data or other users' information.",
+          note: "If you need technical support, please contact AICHECKLIST staff directly."
+        });
+      }
+
+      // Rate limiting check (enhanced)
+      const requestKey = `domoai_${userId}_${Math.floor(Date.now() / 60000)}`; // Per minute
+      // In production, implement Redis-based rate limiting
+
+      // COMPLIANCE MONITORING: Check for illegal activity and alert admin
+      console.log('[ROUTE DEBUG] Starting compliance check for userId:', userId);
+      const complianceUser = await storage.getUserById(userId);
+      console.log('[ROUTE DEBUG] Got compliance user:', !!complianceUser);
+      if (complianceUser) {
+        const geoInfo = getGeoInfo(req);
+        console.log('[ROUTE DEBUG] Got geoInfo:', geoInfo.country);
+        const complianceResult = await monitorAIRequest(messageText, {
+          userId,
+          email: complianceUser.email,
+          username: complianceUser.username || undefined,
+          ipAddress: geoInfo.ip
+        });
+        
+        // Log high-severity compliance issues
+        if (complianceResult.isSuspicious && (complianceResult.severity === 'high' || complianceResult.severity === 'critical')) {
+          logger.warn('COMPLIANCE ALERT: High-severity suspicious activity', {
+            userId,
+            severity: complianceResult.severity,
+            keywords: complianceResult.matchedKeywords,
+            timestamp: new Date().toISOString()
+          });
+        }
+      }
+
+      const chatResult = await domoAI.chat(messages, userId, userMemory, (req as any).userTimezone, (req as any).superhumanMode);
+      const response = chatResult.response;
+      const calendarConflicts = chatResult.calendarConflicts;
+      
+      // Check if calendar conflicts were detected
+      if (calendarConflicts && calendarConflicts.hasConflicts) {
+        return res.json({
+          response: chatStyleFormat(response),
+          calendarConflicts: {
+            conflicts: calendarConflicts.conflicts,
+            proposals: calendarConflicts.proposals,
+            targetDate: calendarConflicts.targetDate
+          },
+          conflictDetected: true
+        });
+      }
+      
+      // Check if response contains rolling tasks creation request
+      if (response.includes('ROLLING_TASKS:')) {
+        const rollingTasksMatch = response.match(/ROLLING_TASKS:\s*(\[[\s\S]*?\])/);
+        if (rollingTasksMatch) {
+          try {
+            const tasksData = JSON.parse(rollingTasksMatch[1]);
+            const createdTasks = await domoAI.createRollingTasksFromChat({ tasks: tasksData }, userId);
+            
+            // Log successful rolling tasks creation
+            await secureAuditLogger.logSecureRequest(
+              userId,
+              '/api/domoai/chat',
+              'POST',
+              `ROLLING_TASKS_CREATED: ${createdTasks.length} tasks`,
+              200,
+              req
+            );
+            
+            // Extract clean response without the ROLLING_TASKS JSON
+            let cleanResponse = response.replace(/ROLLING_TASKS:\s*\[[\s\S]*?\]/, '').trim();
+            
+            // If no clean response, generate a success message
+            if (!cleanResponse || cleanResponse.length < 10) {
+              const taskList = createdTasks.map((t, i) => `${i + 1}. **${t.title}** - ${t.priority} Priority`).join('\n');
+              cleanResponse = `Perfect! I've created all ${createdTasks.length} tasks with their respective priorities in your task list! \n\n${taskList}\n\nWhat else can I help you with? 😊`;
+            }
+            
+            return res.json({ 
+              response: cleanResponse,
+              taskCreated: true,
+              task: createdTasks[0], // Return first task for notification
+              totalTasksCreated: createdTasks.length
+            });
+          } catch (taskError) {
+            await secureAuditLogger.logSecureRequest(
+              userId,
+              '/api/domoai/chat',
+              'POST',
+              'ROLLING_TASKS_CREATION_FAILED',
+              500,
+              req,
+              'TASK_ERROR'
+            );
+            
+            logger.error('Failed to create rolling tasks from chat:', taskError);
+            return res.json({ 
+              response: "I understand you want to create multiple tasks, but I had trouble processing them. Could you try describing them again?"
+            });
+          }
+        }
+      }
+      
+      // Check if response contains checklist creation request
+      else if (response.includes('CREATE_CHECKLIST:')) {
+        // Use a more robust pattern to extract the complete JSON
+        const checklistMatch = response.match(/CREATE_CHECKLIST:\s*(\{[\s\S]*?\})\s*(?:\n|$)/);
+        if (checklistMatch) {
+          try {
+            // Find the complete JSON object by properly matching braces
+            const startPos = response.indexOf('CREATE_CHECKLIST:') + 'CREATE_CHECKLIST:'.length;
+            const remainingText = response.substring(startPos).trim();
+            
+            let braceCount = 0;
+            let inString = false;
+            let escaped = false;
+            let endIndex = -1;
+            
+            for (let i = 0; i < remainingText.length; i++) {
+              const char = remainingText[i];
+              
+              if (escaped) {
+                escaped = false;
+                continue;
+              }
+              
+              if (char === '\\') {
+                escaped = true;
+                continue;
+              }
+              
+              if (char === '"') {
+                inString = !inString;
+                continue;
+              }
+              
+              if (!inString) {
+                if (char === '{') {
+                  braceCount++;
+                } else if (char === '}') {
+                  braceCount--;
+                  if (braceCount === 0) {
+                    endIndex = i + 1;
+                    break;
+                  }
+                }
+              }
+            }
+            
+            if (endIndex === -1) {
+              throw new Error('Could not find complete JSON object');
+            }
+            
+            const jsonStr = remainingText.substring(0, endIndex);
+            const checklistData = JSON.parse(jsonStr);
+            const createdChecklist = await domoAI.createChecklistFromChat(checklistData, userId);
+            
+            // Log successful checklist creation
+            await secureAuditLogger.logSecureRequest(
+              userId,
+              '/api/domoai/chat',
+              'POST',
+              `CHECKLIST_CREATED: ${createdChecklist.title}`,
+              200,
+              req
+            );
+            
+            // Extract clean response without the CREATE_CHECKLIST JSON
+            let cleanResponse = response.replace(/CREATE_CHECKLIST:\s*{[\s\S]*?}(?=\s|$)/, '').trim();
+            
+            // If no clean response, generate a success message
+            if (!cleanResponse || cleanResponse.length < 10) {
+              const itemCount = createdChecklist.checklistItems.length;
+              cleanResponse = `Perfect! I've created your **${createdChecklist.title}** checklist with ${itemCount} items in the ${createdChecklist.category} category!\n\nYou can find it in your Checklist tab. What else can I help you with? 😊`;
+            }
+            
+            return res.json({ 
+              response: cleanResponse,
+              checklistCreated: true,
+              checklist: createdChecklist
+            });
+          } catch (checklistError) {
+            await secureAuditLogger.logSecureRequest(
+              userId,
+              '/api/domoai/chat',
+              'POST',
+              'CHECKLIST_CREATION_FAILED',
+              500,
+              req,
+              'CHECKLIST_ERROR'
+            );
+            
+            logger.error('Failed to create checklist from chat:', checklistError);
+            logger.error('Checklist data was:', checklistMatch ? checklistMatch[1] : 'No match found');
+            logger.error('Full response was:', response);
+            
+            return res.json({ 
+              response: "I understand you want to create a checklist, but I had trouble processing it. Could you try describing it again? Make sure to specify what items should be in your checklist."
+            });
+          }
+        }
+      }
+      
+      // Check if response contains template request (ADHD Super Hero List)
+      else if (response.includes('TEMPLATE_REQUEST:')) {
+        try {
+          // Extract the template name from DomoAI's response
+          const templateMatch = response.match(/TEMPLATE_REQUEST:\s*(.+)/);
+          const requestedTemplate = templateMatch ? templateMatch[1].trim() : 'ADHD Daily Flow';
+          
+          // Apply the specific template requested by DomoAI
+          const templateResult = await domoAI.applyADHDTemplate(requestedTemplate, userId);
+          
+          if (templateResult) {
+            await secureAuditLogger.logSecureRequest(
+              userId,
+              '/api/domoai/chat',
+              'POST',
+              `ADHD_TEMPLATE_APPLIED: ${templateResult.templateName}`,
+              200,
+              req
+            );
+            
+            // Extract the Super Hero List response from DomoAI's message
+            const cleanResponse = response.replace(/TEMPLATE_REQUEST:\s*(.+)/, '').trim();
+            
+            // Handle different response types
+            let successMessage;
+            if (templateResult.appliedTemplates) {
+              // Multiple templates applied
+              successMessage = `🎉 **Amazing!** I've activated ALL ${templateResult.appliedTemplates.length} ADHD Super Hero templates for you! I've added ${templateResult.tasksCreated} power-up tasks to help you conquer any challenge!\n\n💪 **Applied Templates:** ${templateResult.appliedTemplates.join(', ')}\n\nCheck your Task tab to see all your new Super Hero powers in action!`;
+            } else {
+              // Single template applied
+              successMessage = `🎉 **Great news!** I've activated the "${templateResult.templateName}" template for you! I've added ${templateResult.tasksCreated} Super Hero tasks to help you conquer the day!\n\nCheck your Task tab to see your new power-ups in action!`;
+            }
+            
+            const fullResponse = `${cleanResponse}\n\n${successMessage}`;
+            
+            return res.json({ 
+              response: fullResponse,
+              taskCreated: true,
+              task: templateResult.tasks[0], // Return first task for notification
+              totalTasksCreated: templateResult.tasksCreated,
+              templateApplied: templateResult.templateName
+            });
+          } else {
+            // Fallback if template application fails
+            const cleanResponse = response.replace(/TEMPLATE_REQUEST:\s*(.+)/, '').trim();
+            return res.json({ 
+              response: cleanResponse
+            });
+          }
+        } catch (templateError) {
+          await secureAuditLogger.logSecureRequest(
+            userId,
+            '/api/domoai/chat',
+            'POST',
+            'TEMPLATE_APPLICATION_FAILED',
+            500,
+            req,
+            'TEMPLATE_ERROR'
+          );
+          
+          logger.error('Failed to apply ADHD template:', templateError);
+          const cleanResponse = response.replace(/TEMPLATE_REQUEST:\s*(.+)/, '').trim();
+          return res.json({ 
+            response: cleanResponse
+          });
+        }
+      }
+      
+      // Check if response contains high priority task request
+      else if (response.includes('HIGH_PRIORITY_REQUEST: true')) {
+        try {
+          const highPriorityTasks = await domoAI.getHighPriorityTasks(userId);
+          
+          // Log secure access to high priority tasks
+          await secureAuditLogger.logSecureRequest(
+            userId,
+            '/api/domoai/chat',
+            'POST',
+            `HIGH_PRIORITY_TASKS_ACCESSED: ${highPriorityTasks.length} tasks`,
+            200,
+            req
+          );
+          
+          let taskResponse = "";
+          if (highPriorityTasks.length === 0) {
+            taskResponse = "Good news! You don't have any uncompleted high priority tasks right now. 🎉\n\nYou're staying on top of things! Is there anything else I can help you with?";
+          } else {
+            const taskList = highPriorityTasks.map((task, i) => 
+              `${i + 1}. **${task.title}** - ${task.category}${task.timer ? ` (${task.timer} min timer)` : ''}${task.scheduledDate ? ` (due: ${task.scheduledDate})` : ''}`
+            ).join('\n');
+            
+            taskResponse = `Here are your ${highPriorityTasks.length} high priority tasks that need attention:\n\n${taskList}\n\nThese are your most important items to focus on. Would you like help with any of these?`;
+          }
+          
+          return res.json({ 
+            response: taskResponse,
+            highPriorityTasks: true,
+            taskCount: highPriorityTasks.length
+          });
+        } catch (taskError) {
+          await secureAuditLogger.logSecureRequest(
+            userId,
+            '/api/domoai/chat',
+            'POST',
+            'HIGH_PRIORITY_ACCESS_FAILED',
+            500,
+            req,
+            'TASK_ERROR'
+          );
+          
+          logger.error('Failed to access high priority tasks:', taskError);
+          return res.json({ 
+            response: "I can only help with what you share with me directly, and right now I don't have details on any high priority tasks in your current list. If you'd like, you can let me know about any high priority items you're working on and I'll be happy to help!"
+          });
+        }
+      }
+      
+      // Check if response contains print request
+      else if (response.includes('PRINT_REQUEST:')) {
+        try {
+          const printMatch = response.match(/PRINT_REQUEST:\s*(.+)/);
+          const printRequest = printMatch ? printMatch[1].trim() : '';
+          
+          let printResult;
+          
+          // Handle conversation printing separately
+          if (printRequest === 'conversation') {
+            // Generate conversation print content
+            const conversationHtml = `
+              <div style="max-width: 800px; margin: 0 auto; font-family: Arial, sans-serif; line-height: 1.6;">
+                <div style="text-align: center; border-bottom: 2px solid #333; padding-bottom: 20px; margin-bottom: 30px;">
+                  <h1 style="color: #2563eb; margin-bottom: 10px;">AIDOMO Chat Conversation</h1>
+                  <p style="color: #666; margin: 0;">AICHECKLIST.IO - Your AI-Powered Digital Majordomo</p>
+                  <p style="color: #999; font-size: 14px; margin: 5px 0 0 0;">
+                    Printed on ${new Date().toLocaleDateString()} at ${new Date().toLocaleTimeString()}
+                  </p>
+                </div>
+                
+                <div style="space-y: 20px;">
+                  ${messages.map((message, index) => `
+                    <div style="margin-bottom: 20px; padding: 15px; border-radius: 8px; ${
+                      message.role === 'user' 
+                        ? 'background-color: #2563eb; color: white; margin-left: 20%;' 
+                        : 'background-color: #f3f4f6; color: #333; margin-right: 20%;'
+                    }">
+                      <div style="font-weight: bold; font-size: 12px; text-transform: uppercase; margin-bottom: 8px; opacity: 0.8;">
+                        ${message.role === 'user' ? 'You' : 'AIDOMO'}
+                      </div>
+                      <div style="white-space: pre-wrap;">${message.content}</div>
+                      <div style="font-size: 11px; margin-top: 8px; opacity: 0.7;">
+                        Message ${index + 1} of ${messages.length}
+                      </div>
+                    </div>
+                  `).join('')}
+                </div>
+                
+                <div style="margin-top: 40px; padding-top: 20px; border-top: 1px solid #e5e7eb; text-align: center; color: #666; font-size: 12px;">
+                  <p>Generated by AIDOMO - Your AI-Powered Digital Majordomo</p>
+                  <p>AICHECKLIST.IO - Intelligent Task Management Platform</p>
+                </div>
+              </div>
+            `;
+            
+            printResult = {
+              success: true,
+              title: 'AIDOMO Chat Conversation',
+              content: conversationHtml
+            };
+          } else {
+            // Handle other print requests through the printing service
+            const { printingService } = await import('./printingService');
+            printResult = await printingService.handlePrintRequest(printRequest, userId);
+          }
+          
+          if (printResult.success) {
+            await secureAuditLogger.logSecureRequest(
+              userId,
+              '/api/domoai/chat',
+              'POST',
+              `PRINT_REQUEST_PROCESSED: ${printRequest}`,
+              200,
+              req
+            );
+            
+            const cleanResponse = response.replace(/PRINT_REQUEST:\s*(.+)/, '').trim();
+            const printResponse = printRequest === 'conversation' 
+              ? `${cleanResponse}\n\n🖨️ **Excellent!** I've prepared your complete AIDOMO conversation for printing. The document includes all our messages with professional formatting and timestamps.\n\nYour conversation history is now ready for immediate printing with beautiful styling that captures our entire interaction.\n\n📋 What else can I help you accomplish today?`
+              : `${cleanResponse}\n\n🖨️ **Perfect!** I've prepared your professional print-ready document titled "${printResult.title}". The document has been formatted with beautiful styling and is ready for immediate printing.\n\nThe content is now available in your browser's print dialog. Simply use Ctrl+P (or Cmd+P on Mac) to print your professionally formatted document.\n\n📋 What else can I help you print or organize today?`;
+            
+            return res.json({ 
+              response: printResponse,
+              printGenerated: true,
+              printContent: printResult.content,
+              printTitle: printResult.title
+            });
+          } else {
+            const cleanResponse = response.replace(/PRINT_REQUEST:\s*(.+)/, '').trim();
+            return res.json({ 
+              response: `${cleanResponse}\n\nI had trouble processing your print request. Could you be more specific about what you'd like me to print? I can print our conversation, todo lists, checklists, templates, and more!`
+            });
+          }
+        } catch (printError) {
+          await secureAuditLogger.logSecureRequest(
+            userId,
+            '/api/domoai/chat',
+            'POST',
+            'PRINT_REQUEST_FAILED',
+            500,
+            req,
+            'PRINT_ERROR'
+          );
+          
+          logger.error('Failed to process print request:', printError);
+          const cleanResponse = response.replace(/PRINT_REQUEST:\s*(.+)/, '').trim();
+          return res.json({ 
+            response: `${cleanResponse}\n\nI'm having trouble with the printing service right now. Please try again in a moment.`
+          });
+        }
+      }
+      
+      // Check if response contains webpage summarization request
+      else if (response.includes('SUMMARIZE_REQUEST:')) {
+        try {
+          const summarizeMatch = response.match(/SUMMARIZE_REQUEST:\s*(.+)/);
+          if (summarizeMatch) {
+            const [mode, url] = summarizeMatch[1].split('|').map(s => s.trim());
+            
+            if (!url || !url.startsWith('http')) {
+              const cleanResponse = response.replace(/SUMMARIZE_REQUEST:\s*(.+)/, '').trim();
+              return res.json({
+                response: `${cleanResponse}\n\nI need a valid URL to summarize. Please provide the full webpage URL (starting with http:// or https://)`
+              });
+            }
+            
+            // Determine which options to include based on mode
+            const options = {
+              includeAccessible: mode === 'accessible' || mode === 'full',
+              includeHighlights: mode === 'highlights' || mode === 'full',
+              generatePdf: mode === 'pdf' || mode === 'full'
+            };
+            
+            // Import webSummarizer
+            const { webSummarizer } = await import('./webSummarizer');
+            
+            // Perform summarization with userId for PDF access control
+            const summarizationResult = await webSummarizer.summarizeWebpage(url, userId, options);
+            
+            // Log successful summarization
+            await secureAuditLogger.logSecureRequest(
+              userId,
+              '/api/domoai/chat',
+              'POST',
+              `WEBPAGE_SUMMARIZED: ${mode}`,
+              200,
+              req
+            );
+            
+            // Build response
+            let summarizeResponse = `✅ **Webpage Analysis Complete**\n\n`;
+            summarizeResponse += `**Summary:**\n${summarizationResult.summary}\n\n`;
+            
+            if (summarizationResult.accessible) {
+              summarizeResponse += `**ADHD & Dyslexia-Friendly Version:**\n${summarizationResult.accessible}\n\n`;
+            }
+            
+            if (summarizationResult.highlighted) {
+              summarizeResponse += `**Key Insights Highlighted:**\n${summarizationResult.highlighted}\n\n`;
+            }
+            
+            if (summarizationResult.downloadUrl) {
+              summarizeResponse += `📄 **PDF Report Generated:** [Download your comprehensive analysis](${summarizationResult.downloadUrl})\n\n`;
+            }
+            
+            const cleanResponse = response.replace(/SUMMARIZE_REQUEST:\s*(.+)/, '').trim();
+            const fullResponse = cleanResponse ? `${cleanResponse}\n\n${summarizeResponse}` : summarizeResponse;
+            
+            return res.json({
+              response: fullResponse,
+              summarizationComplete: true,
+              summarizationResult: {
+                summary: summarizationResult.summary,
+                accessible: summarizationResult.accessible,
+                highlighted: summarizationResult.highlighted,
+                downloadUrl: summarizationResult.downloadUrl
+              }
+            });
+          }
+        } catch (summarizeError) {
+          await secureAuditLogger.logSecureRequest(
+            userId,
+            '/api/domoai/chat',
+            'POST',
+            'SUMMARIZATION_FAILED',
+            500,
+            req,
+            'SUMMARIZE_ERROR'
+          );
+          
+          logger.error('Failed to summarize webpage:', summarizeError);
+          const cleanResponse = response.replace(/SUMMARIZE_REQUEST:\s*(.+)/, '').trim();
+          return res.json({
+            response: `${cleanResponse}\n\nI encountered an issue analyzing that webpage. This might be due to:\n- The URL being inaccessible or protected\n- Content that's too large or complex\n- Network connectivity issues\n\nPlease try again with a different URL or check if the page is publicly accessible.`
+          });
+        }
+      }
+      
+      // Check if response contains single task creation request
+      else if (response.includes('CREATE_TASK:')) {
+        const taskDataMatch = response.match(/CREATE_TASK: ({.*?})/);
+        if (taskDataMatch) {
+          try {
+            const taskData = JSON.parse(taskDataMatch[1]);
+            const createdTask = await domoAI.createTaskFromChat(taskData, userId, (req as any).userTimezone);
+            
+            // Log successful task creation
+            await secureAuditLogger.logSecureRequest(
+              userId,
+              '/api/domoai/chat',
+              'POST',
+              `TASK_CREATED: ${createdTask.category}`,
+              200,
+              req
+            );
+            
+            const successResponse = `Great! I've created that task for you: "${createdTask.title}" 🎉\n\nIt's been added to your ${createdTask.category} tasks with ${createdTask.priority} priority${createdTask.timer ? ` and a ${createdTask.timer}-minute timer` : ''}${createdTask.scheduledDate ? ` scheduled for ${createdTask.scheduledDate}` : ''}.\n\nWhat else can I help you with today?`;
+            
+            return res.json({ 
+              response: successResponse,
+              taskCreated: true,
+              task: createdTask 
+            });
+          } catch (taskError) {
+            await secureAuditLogger.logSecureRequest(
+              userId,
+              '/api/domoai/chat',
+              'POST',
+              'TASK_CREATION_FAILED',
+              500,
+              req,
+              'TASK_ERROR'
+            );
+            
+            logger.error('Failed to create task from chat:', taskError);
+            return res.json({ 
+              response: "I understand you want to create a task, but I had trouble processing it. Could you try describing them again?"
+            });
+          }
+        }
+      }
+      
+      // Check if response contains schedule sharing request
+      else if (response.includes('SHARE_SCHEDULE:')) {
+        const shareMatch = response.match(/SHARE_SCHEDULE:\s*(\{[\s\S]*?\})/);
+        if (shareMatch) {
+          try {
+            const shareData = JSON.parse(shareMatch[1]);
+            const { recipient, permission, shareType, message: shareMessage } = shareData;
+            
+            if (!recipient) {
+              const cleanResponse = response.replace(/SHARE_SCHEDULE:\s*\{[\s\S]*?\}/, '').trim();
+              return res.json({
+                response: `${cleanResponse}\n\n❌ I need to know who you want to share with. Please provide a username or email address.`
+              });
+            }
+            
+            // Look up the recipient user
+            const recipientUser = await db
+              .select({ id: users.id, username: users.username, email: users.email })
+              .from(users)
+              .where(
+                or(
+                  eq(users.username, recipient),
+                  eq(users.email, recipient)
+                )
+              )
+              .limit(1);
+            
+            if (recipientUser.length === 0) {
+              const cleanResponse = response.replace(/SHARE_SCHEDULE:\s*\{[\s\S]*?\}/, '').trim();
+              return res.json({
+                response: `${cleanResponse}\n\n❌ I couldn't find a user with the username or email "${recipient}". Please check the spelling and try again.`
+              });
+            }
+            
+            const recipientInfo = recipientUser[0];
+            
+            if (recipientInfo.id === userId) {
+              const cleanResponse = response.replace(/SHARE_SCHEDULE:\s*\{[\s\S]*?\}/, '').trim();
+              return res.json({
+                response: `${cleanResponse}\n\n😊 You can't share your schedule with yourself! Is there someone else you'd like to share with?`
+              });
+            }
+            
+            // Check for existing active share
+            const existingShare = await db
+              .select()
+              .from(scheduleShares)
+              .where(
+                and(
+                  eq(scheduleShares.ownerUserId, userId),
+                  eq(scheduleShares.sharedWithUserId, recipientInfo.id),
+                  eq(scheduleShares.isActive, true)
+                )
+              )
+              .limit(1);
+            
+            if (existingShare.length > 0) {
+              const cleanResponse = response.replace(/SHARE_SCHEDULE:\s*\{[\s\S]*?\}/, '').trim();
+              return res.json({
+                response: `${cleanResponse}\n\n📤 You already have an active share with **${recipientInfo.username}**! You can manage your existing shares in the Calendar's Share dialog.`,
+                scheduleShared: false,
+                existingShare: true
+              });
+            }
+            
+            // Create the schedule share
+            const validPermission = ['view', 'edit', 'full'].includes(permission) ? permission : 'view';
+            const validShareType = shareType === 'selective' ? 'selective' : 'full';
+            
+            const [newShare] = await db.insert(scheduleShares).values({
+              ownerUserId: userId,
+              sharedWithUserId: recipientInfo.id,
+              sharedWithUsername: recipientInfo.username,
+              sharedWithEmail: recipientInfo.email,
+              permission: validPermission,
+              shareType: validShareType,
+              selectedTaskIds: null,
+              message: shareMessage || 'Shared via AIDOMO',
+              isActive: true,
+            }).returning();
+            
+            // Log successful share creation
+            await secureAuditLogger.logSecureRequest(
+              userId,
+              '/api/domoai/chat',
+              'POST',
+              `SCHEDULE_SHARED: with ${recipientInfo.username} (${validPermission})`,
+              200,
+              req
+            );
+            
+            const permissionLabel = validPermission === 'view' ? 'View Only' : 
+                                    validPermission === 'edit' ? 'Can Edit' : 'Full Access';
+            
+            const cleanResponse = response.replace(/SHARE_SCHEDULE:\s*\{[\s\S]*?\}/, '').trim();
+            const successMessage = `${cleanResponse}\n\n✅ **Schedule Shared Successfully!**\n\n📤 I've shared your ${validShareType === 'full' ? 'full schedule' : 'selected items'} with **${recipientInfo.username}**\n🔐 Permission level: **${permissionLabel}**\n\nThey'll receive a notification and can accept or decline the share. You can manage your shares anytime from the Calendar's Share button!`;
+            
+            return res.json({
+              response: successMessage,
+              scheduleShared: true,
+              share: {
+                id: newShare.id,
+                recipient: recipientInfo.username,
+                permission: validPermission
+              }
+            });
+          } catch (shareError) {
+            await secureAuditLogger.logSecureRequest(
+              userId,
+              '/api/domoai/chat',
+              'POST',
+              'SCHEDULE_SHARE_FAILED',
+              500,
+              req,
+              'SHARE_ERROR'
+            );
+            
+            logger.error('Failed to share schedule from chat:', shareError);
+            const cleanResponse = response.replace(/SHARE_SCHEDULE:\s*\{[\s\S]*?\}/, '').trim();
+            return res.json({
+              response: `${cleanResponse}\n\n❌ I had trouble processing the share request. Please try again or use the Share button in your Calendar.`
+            });
+          }
+        }
+      }
+
+      // Log successful chat completion
+      await secureAuditLogger.logSecureRequest(
+        userId,
+        '/api/domoai/chat',
+        'POST',
+        'CHAT_COMPLETED',
+        200,
+        req
+      );
+
+      res.json({ response: chatStyleFormat(response), calendarConflicts: calendarConflicts || null });
+    } catch (error: any) {
+      // Log error with full details
+      const errorDetails = error instanceof Error 
+        ? { message: error.message, name: error.name, stack: error.stack?.substring(0, 1000) }
+        : String(error);
+      console.error('[DOMOAI ERROR] Full error:', JSON.stringify(errorDetails, null, 2));
+      
+      await secureAuditLogger.logSecureRequest(
+        (req as any).userId || 'unknown',
+        '/api/domoai/chat',
+        'POST',
+        'CHAT_ERROR',
+        500,
+        req,
+        'SYSTEM_ERROR'
+      );
+      
+      logger.error("DomoAI chat error:", error);
+      res.status(500).json({ message: "I'm having trouble right now. Please try again!" });
+    }
+  });
+
+  // STAFF-ONLY: Secure audit log access endpoint
+  app.get("/api/admin/audit-logs", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const user = await storage.getUserById(userId);
+      
+      // Only allow admin users to access audit logs
+      if (!user || (user as any).role !== 'admin') {
+        await secureAuditLogger.logSecureRequest(
+          userId,
+          '/api/admin/audit-logs',
+          'GET',
+          'UNAUTHORIZED_AUDIT_ACCESS',
+          403,
+          req,
+          'SECURITY_VIOLATION'
+        );
+        
+        return res.status(403).json({ 
+          message: "Access denied: Administrator privileges required" 
+        });
+      }
+
+      const staffKey = req.headers['x-staff-key'] as string;
+      
+      if (!staffKey) {
+        return res.status(400).json({ 
+          message: "Staff access key required",
+          note: "Contact system administrator for audit log access"
+        });
+      }
+
+      const filters = {
+        userId: req.query.userId as string,
+        endpoint: req.query.endpoint as string,
+        dateFrom: req.query.dateFrom ? new Date(req.query.dateFrom as string) : undefined,
+        dateTo: req.query.dateTo ? new Date(req.query.dateTo as string) : undefined,
+        errorOnly: req.query.errorOnly === 'true'
+      };
+
+      const auditLogs = await secureAuditLogger.getAuditLogs(staffKey, filters);
+      
+      if (!auditLogs) {
+        return res.status(403).json({ 
+          message: "Invalid staff credentials" 
+        });
+      }
+
+      // Log admin access to audit logs
+      await secureAuditLogger.logSecureRequest(
+        userId,
+        '/api/admin/audit-logs',
+        'GET',
+        'AUDIT_LOG_ACCESS_GRANTED',
+        200,
+        req
+      );
+
+      res.json({ 
+        success: true, 
+        logs: auditLogs,
+        note: "Customer data is encrypted and accessible only to authorized AICHECKLIST staff"
+      });
+
+    } catch (error) {
+      logger.error("Audit log access error:", error);
+      res.status(500).json({ message: "Failed to retrieve audit logs" });
+    }
+  });
+
+  app.get("/api/domoai/analyze", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const analysis = await domoAI.analyzeTasks(userId);
+      res.json({ analysis });
+    } catch (error) {
+      logger.error("DomoAI task analysis error:", error);
+      res.status(500).json({ message: "Failed to analyze tasks" });
+    }
+  });
+
+  app.get("/api/domoai/tips", requireAuth, async (req: Request, res: Response) => {
+    try {
+      // Prevent caching to ensure fresh tips
+      res.set({
+        'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        'Surrogate-Control': 'no-store'
+      });
+      
+      const tips = await domoAI.getProductivityTips();
+      res.json({ tips });
+    } catch (error) {
+      logger.error("DomoAI productivity tips error:", error);
+      res.status(500).json({ message: "Failed to get productivity tips" });
+    }
+  });
+
+  // DomoAI Voice Status endpoint - check voice feature access
+  app.get("/api/domoai/voice-status", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const user = await storage.getCustomerById(userId);
+      
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      // Check if user is enterprise
+      const isEnterprise = user.subscriptionPlan === 'enterprise' || user.customerType === 'enterprise';
+      
+      // For enterprise accounts, voice is always enabled
+      if (isEnterprise) {
+        return res.json({
+          enabled: true,
+          isEnterprise: true,
+          trialDaysLeft: null,
+          message: "Voice features enabled for enterprise account"
+        });
+      }
+
+      // For demo/free accounts, check trial status
+      const now = new Date();
+      let trialStartDate = user.voiceTrialStartDate;
+      
+      // If no trial start date, this is first use - start the trial
+      if (!trialStartDate) {
+        await storage.updateCustomer(userId, {
+          voiceTrialStartDate: now,
+          voiceTrialActive: true
+        });
+        trialStartDate = now;
+      }
+
+      // Calculate days since trial started
+      const trialDays = 7; // One week trial
+      const daysSinceStart = Math.floor((now.getTime() - new Date(trialStartDate).getTime()) / (1000 * 60 * 60 * 24));
+      const daysLeft = Math.max(0, trialDays - daysSinceStart);
+      
+      // Check if trial has expired
+      const trialExpired = daysSinceStart >= trialDays;
+      
+      // Update trial status if expired
+      if (trialExpired && user.voiceTrialActive) {
+        await storage.updateCustomer(userId, {
+          voiceTrialActive: false
+        });
+      }
+
+      return res.json({
+        enabled: !trialExpired,
+        isEnterprise: false,
+        trialDaysLeft: trialExpired ? 0 : daysLeft,
+        message: trialExpired 
+          ? "Voice trial expired. Upgrade to Enterprise to continue using voice features."
+          : `Voice trial active. ${daysLeft} days remaining.`
+      });
+      
+    } catch (error) {
+      logger.error("Voice status check error:", error);
+      res.status(500).json({ message: "Failed to check voice status" });
+    }
+  });
+
+  // Export AIDOMO conversation as Word document
+  app.post("/api/domoai/export-word", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { messages, title } = req.body;
+      
+      if (!messages || !Array.isArray(messages)) {
+        return res.status(400).json({ message: "Invalid messages format" });
+      }
+
+      // Import the word export service
+      const { generateWordDocument } = await import("./wordExport");
+      
+      // Generate the Word document
+      const buffer = await generateWordDocument(
+        messages,
+        title || 'AIDOMO Chat Export'
+      );
+
+      // Create a filename with timestamp
+      const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
+      const filename = `AIDOMO_Chat_${timestamp}.docx`;
+
+      // Set headers for file download
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('Content-Length', buffer.length.toString());
+
+      // Send the buffer
+      res.send(buffer);
+      
+      logger.info(`Word document exported successfully for user ${(req as any).userId}`);
+    } catch (error) {
+      logger.error("Word export error:", error);
+      res.status(500).json({ message: "Failed to export Word document" });
+    }
+  });
+
+  // Get current authenticated user (handler function for reuse)
+  const getCurrentUserHandler = async (req: Request, res: Response) => {
+    try {
+      const currentUserId = (req as any).userId;
+      
+      // Get user from database by ID using storage interface
+      const user = await storage.getCustomerById(currentUserId);
+      
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      
+      // Return user data without sensitive information
+      const { password: _, voicePassword: __, ...userResponse } = user;
+      
+      res.json(userResponse);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to get current user", { error: errorMessage });
+      res.status(500).json({ message: "Failed to get user data" });
+    }
+  };
+
+  // Register both /api/user and /api/auth/user endpoints
+  app.get("/api/user", requireAuth, getCurrentUserHandler);
+  app.get("/api/auth/user", requireAuth, getCurrentUserHandler);
+
+  // Profile update route
+  app.patch("/api/user/profile", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const currentUserId = (req as any).userId;
+      const { fullName, companyName, address, profilePictureUrl } = req.body;
+      
+      // Validate input
+      const profileData: Partial<User> = {};
+      if (fullName !== undefined) profileData.fullName = fullName;
+      if (companyName !== undefined) profileData.companyName = companyName; 
+      if (address !== undefined) profileData.address = address;
+      if (profilePictureUrl !== undefined) profileData.profilePictureUrl = profilePictureUrl;
+      
+      const updatedUser = await storage.updateUserProfile(currentUserId, profileData);
+      
+      if (!updatedUser) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      
+      // Return user data without sensitive information
+      const { password: _, voicePassword: __, ...userResponse } = updatedUser;
+      
+      logger.info(`Profile updated for user: ${currentUserId}`, { 
+        updates: Object.keys(profileData)
+      });
+      
+      res.json(userResponse);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to update user profile", { error: errorMessage });
+      res.status(500).json({ message: "Failed to update profile" });
+    }
+  });
+
+  // Subscription Routes
+  app.get("/api/subscription-plans", async (req: Request, res: Response) => {
+    try {
+      const plans = await db.select()
+        .from(subscriptionPlans)
+        .where(eq(subscriptionPlans.isActive, true))
+        .orderBy(subscriptionPlans.price);
+
+      res.status(200).json({
+        success: true,
+        plans
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error('Failed to get subscription plans', { error: errorMessage });
+      
+      res.status(500).json({ 
+        success: false,
+        message: 'Failed to get subscription plans. Please try again later.',
+        error: errorMessage
+      });
+    }
+  });
+
+  app.post("/api/subscriptions/trial", async (req: Request, res: Response) => {
+    try {
+      const { planId, userId = 1 } = req.body; // Default to user ID 1 for demo purposes
+      
+      // In a real app, you would get the user ID from the authenticated session
+      
+      // Start a plan-specific free trial for the user
+      const result = await startFreeTrial(userId, planId);
+      
+      logger.info('Started plan-specific free trial', { 
+        userId, 
+        planId: planId || 'free', 
+        trialDays: result.trialDays 
+      });
+      
+      res.status(200).json({
+        success: true,
+        trialEndsAt: result.trialEndsAt,
+        trialDays: result.trialDays,
+        message: `Your ${result.trialDays}-day free trial has been started successfully`
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error('Failed to start free trial', { error: errorMessage });
+      
+      // Create a more graceful error response
+      res.status(500).json({ 
+        success: false,
+        message: 'Failed to start free trial. Please try again later.',
+        error: errorMessage
+      });
+    }
+  });
+  
+  app.post("/api/subscriptions", async (req: Request, res: Response) => {
+    try {
+      const { planId, userId = 1 } = req.body; // Default to user ID 1 for demo purposes
+      
+      // In a real app, you would get the user ID from the authenticated session
+      
+      // Create a subscription with Stripe
+      const subscription = await createSubscription(userId, planId);
+      
+      res.status(200).json({
+        success: true,
+        subscriptionId: subscription.subscriptionId,
+        clientSecret: subscription.clientSecret
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error('Failed to create subscription', { error: errorMessage });
+      
+      // Create a more descriptive error response
+      let userMessage = 'Failed to create subscription. Please try again later.';
+      let statusCode = 500;
+      
+      // Handle common errors
+      if (errorMessage.includes('not found')) {
+        statusCode = 404;
+        userMessage = errorMessage;
+      } else if (errorMessage.includes('Price ID')) {
+        statusCode = 400; 
+        userMessage = 'Invalid subscription plan selected.';
+      }
+      
+      res.status(statusCode).json({ 
+        success: false,
+        message: userMessage,
+        error: errorMessage
+      });
+    }
+  });
+  
+  app.get("/api/subscriptions/status", async (req: Request, res: Response) => {
+    try {
+      // Get user ID from session (authenticated user)
+      const sessionId = req.headers.authorization?.replace('Bearer ', '');
+      const authenticatedUserId = sessionId ? await getUserIdFromSession(sessionId) : null;
+      const userId = authenticatedUserId || parseInt(req.query.userId as string || '1');
+      
+      // Check if user is a founder (always has active status, no fees)
+      const [user] = await db.select().from(users).where(eq(users.id, userId));
+      if (user?.customerType === 'founder') {
+        return res.status(200).json({
+          success: true,
+          status: 'active',
+          planId: 'founder',
+          isFounder: true
+        });
+      }
+      
+      // Get the user's subscription status
+      const status = await getUserSubscription(userId);
+      
+      res.status(200).json({
+        success: true,
+        ...status
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error('Failed to get subscription status', { error: errorMessage });
+      
+      // Return a useful status even in case of error
+      res.status(200).json({ 
+        success: false,
+        status: 'unknown',
+        message: 'Could not retrieve subscription status',
+        error: errorMessage
+      });
+    }
+  });
+  
+  app.post("/api/subscriptions/cancel", async (req: Request, res: Response) => {
+    try {
+      const { userId = 1 } = req.body; // Default to user ID 1 for demo purposes
+      
+      // In a real app, you would get the user ID from the authenticated session
+      
+      // Cancel the subscription with Stripe
+      const result = await cancelSubscription(userId);
+      
+      res.status(200).json({
+        success: true,
+        message: 'Your subscription has been canceled and will end at the current billing period'
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error('Failed to cancel subscription', { error: errorMessage });
+      
+      let userMessage = 'Failed to cancel subscription. Please try again later.';
+      let statusCode = 500;
+      
+      // Handle specific errors
+      if (errorMessage.includes('not found') || errorMessage.includes('no subscription')) {
+        statusCode = 404;
+        userMessage = 'No active subscription found to cancel.';
+      }
+      
+      res.status(statusCode).json({ 
+        success: false,
+        message: userMessage,
+        error: errorMessage
+      });
+    }
+  });
+
+  // Stripe Integration Routes (using Replit connection)
+  app.get("/api/stripe/config", async (req: Request, res: Response) => {
+    try {
+      const { getStripePublishableKey } = await import('./stripeClient');
+      const publishableKey = await getStripePublishableKey();
+      res.json({ publishableKey });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error('Failed to get Stripe config', { error: errorMessage });
+      res.status(500).json({ error: 'Stripe not configured' });
+    }
+  });
+
+  app.get("/api/stripe/products", async (req: Request, res: Response) => {
+    try {
+      const result = await db.execute(sql`
+        WITH product_data AS (
+          SELECT 
+            p.id as product_id,
+            p.name as product_name,
+            p.description as product_description,
+            p.active as product_active,
+            p.metadata as product_metadata,
+            pr.id as price_id,
+            pr.unit_amount,
+            pr.currency,
+            pr.recurring,
+            pr.active as price_active,
+            pr.metadata as price_metadata
+          FROM stripe.products p
+          LEFT JOIN stripe.prices pr ON pr.product = p.id AND pr.active = true
+          WHERE p.active = true
+          ORDER BY p.id, pr.unit_amount
+        )
+        SELECT * FROM product_data
+      `);
+
+      const productsMap = new Map<string, any>();
+      for (const row of result.rows as any[]) {
+        if (!productsMap.has(row.product_id)) {
+          productsMap.set(row.product_id, {
+            id: row.product_id,
+            name: row.product_name,
+            description: row.product_description,
+            active: row.product_active,
+            metadata: row.product_metadata,
+            prices: []
+          });
+        }
+        if (row.price_id) {
+          productsMap.get(row.product_id).prices.push({
+            id: row.price_id,
+            unit_amount: row.unit_amount,
+            currency: row.currency,
+            recurring: row.recurring,
+            active: row.price_active,
+            metadata: row.price_metadata
+          });
+        }
+      }
+
+      res.json({ success: true, products: Array.from(productsMap.values()) });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error('Failed to get Stripe products', { error: errorMessage });
+      res.status(500).json({ success: false, error: 'Failed to get products' });
+    }
+  });
+
+  // Plan-based checkout - accepts plan name (pro/team) and optional billing interval
+  app.post("/api/stripe/checkout-by-plan", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { plan, interval } = req.body; // interval: 'month' | 'year'
+      const userId = (req as any).userId;
+
+      if (!plan || !['pro', 'team'].includes(plan)) {
+        return res.status(400).json({ error: 'Valid plan (pro/team) is required' });
+      }
+
+      // Use live Stripe key directly to access products (Replit connector may be in test mode)
+      const stripeKey = process.env.STRIPE_LIVE_SECRET_KEY || process.env.STRIPE_TEST_SECRET_KEY || process.env.STRIPE_SECRET_KEY;
+      if (!stripeKey) {
+        return res.status(500).json({ error: 'Stripe not configured' });
+      }
+      const stripeClient = new Stripe(stripeKey);
+
+      // Fetch products directly from Stripe API
+      const products = await stripeClient.products.list({ active: true, limit: 100 });
+      const prices = await stripeClient.prices.list({ active: true, limit: 100 });
+      
+      logger.info('Stripe products fetched', { productCount: products.data.length, productNames: products.data.map(p => p.name) });
+
+      // Find the price for the requested plan (match by product name containing 'pro' or 'team')
+      let priceId: string | null = null;
+      for (const product of products.data) {
+        const productName = (product.name || '').toLowerCase();
+        let matchesPlan = false;
+        
+        if (plan === 'pro' && productName.includes('pro') && !productName.includes('team')) {
+          matchesPlan = true;
+        }
+        if (plan === 'team' && (productName.includes('team') || productName.includes('enterprise') || productName.includes('business'))) {
+          matchesPlan = true;
+        }
+        
+        if (matchesPlan) {
+          // Find an active price for this product, filtered by interval if specified
+          const productPrices = prices.data.filter(p => p.product === product.id && p.active);
+          let productPrice = null;
+          
+          if (interval === 'year') {
+            // Look for yearly price first
+            productPrice = productPrices.find(p => p.recurring?.interval === 'year');
+          } else if (interval === 'month') {
+            // Look for monthly price
+            productPrice = productPrices.find(p => p.recurring?.interval === 'month');
+          }
+          
+          // Fallback to any active price if interval not found or not specified
+          if (!productPrice) {
+            productPrice = productPrices[0];
+          }
+          
+          if (productPrice) {
+            priceId = productPrice.id;
+            logger.info('Found price for plan', { plan, interval, productName: product.name, priceId });
+            break;
+          }
+        }
+      }
+
+      if (!priceId) {
+        logger.error('Price not found for plan', { plan, availableProducts: products.data.map(p => p.name) });
+        return res.status(404).json({ error: 'Plan not found' });
+      }
+
+      const user = await storage.getUserById(userId);
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      let customerId = user.stripeCustomerId;
+      if (!customerId) {
+        const customer = await stripeClient.customers.create({
+          email: user.email || undefined,
+          metadata: { userId: userId.toString() },
+        });
+        customerId = customer.id;
+        await db.update(users)
+          .set({ stripeCustomerId: customerId })
+          .where(eq(users.id, userId));
+      }
+
+      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+      const session = await stripeClient.checkout.sessions.create({
+        customer: customerId,
+        payment_method_types: ['card'],
+        line_items: [{ price: priceId, quantity: 1 }],
+        mode: 'subscription',
+        success_url: `${baseUrl}/pricing?success=true`,
+        cancel_url: `${baseUrl}/pricing?canceled=true`,
+      });
+
+      res.json({ url: session.url });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error('Failed to create plan-based checkout session', { error: errorMessage });
+      res.status(500).json({ error: 'Failed to create checkout session' });
+    }
+  });
+
+  app.post("/api/stripe/checkout", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { priceId } = req.body;
+      const userId = (req as any).userId;
+
+      if (!priceId) {
+        return res.status(400).json({ error: 'Price ID is required' });
+      }
+
+      const user = await storage.getUserById(userId);
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      const { getUncachableStripeClient } = await import('./stripeClient');
+      const stripeClient = await getUncachableStripeClient();
+
+      let customerId = user.stripeCustomerId;
+      if (!customerId) {
+        const customer = await stripeClient.customers.create({
+          email: user.email || undefined,
+          metadata: { userId: userId.toString() },
+        });
+        customerId = customer.id;
+        await db.update(users)
+          .set({ stripeCustomerId: customerId })
+          .where(eq(users.id, userId));
+      }
+
+      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+      const session = await stripeClient.checkout.sessions.create({
+        customer: customerId,
+        payment_method_types: ['card'],
+        line_items: [{ price: priceId, quantity: 1 }],
+        mode: 'subscription',
+        success_url: `${baseUrl}/pricing?success=true`,
+        cancel_url: `${baseUrl}/pricing?canceled=true`,
+      });
+
+      res.json({ url: session.url });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error('Failed to create checkout session', { error: errorMessage });
+      res.status(500).json({ error: 'Failed to create checkout session' });
+    }
+  });
+
+  app.post("/api/stripe/portal", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const user = await storage.getUserById(userId);
+      
+      if (!user?.stripeCustomerId) {
+        return res.status(400).json({ error: 'No Stripe customer found' });
+      }
+
+      const { getUncachableStripeClient } = await import('./stripeClient');
+      const stripeClient = await getUncachableStripeClient();
+
+      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+      const session = await stripeClient.billingPortal.sessions.create({
+        customer: user.stripeCustomerId,
+        return_url: `${baseUrl}/pricing`,
+      });
+
+      res.json({ url: session.url });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error('Failed to create portal session', { error: errorMessage });
+      res.status(500).json({ error: 'Failed to create portal session' });
+    }
+  });
+
+  // Feedback Routes
+  app.post("/api/feedback", async (req: Request, res: Response) => {
+    try {
+      const validatedData = insertFeedbackSchema.parse(req.body);
+      
+      const feedback = await storage.createFeedback(validatedData);
+      
+      logger.info(`Feedback submitted: ${feedback.subject}`, { 
+        feedbackId: feedback.id,
+        category: feedback.category,
+        rating: feedback.rating 
+      });
+      
+      // Send feedback email notification
+      const { sendEmail } = await import('./email-service');
+      const feedbackEmailAddress = 'aichecklist.io.scouts338@passmail.net';
+      
+      const emailHtml = `
+        <h2>New Feedback Received</h2>
+        <p><strong>From:</strong> ${feedback.email || 'Not provided'}</p>
+        <p><strong>Name:</strong> ${feedback.name || 'Anonymous'}</p>
+        <p><strong>Category:</strong> ${feedback.category || 'General'}</p>
+        <p><strong>Subject:</strong> ${feedback.subject}</p>
+        <p><strong>Rating:</strong> ${feedback.rating ? feedback.rating + '/5' : 'Not rated'}</p>
+        <hr/>
+        <p><strong>Message:</strong></p>
+        <p>${feedback.message}</p>
+        <hr/>
+        <p><small>Feedback ID: ${feedback.id} | Submitted at: ${new Date().toISOString()}</small></p>
+      `;
+      
+      const emailSent = await sendEmail({
+        to: feedbackEmailAddress,
+        from: 'noreply@aichecklist.io',
+        subject: `[AIChecklist Feedback] ${feedback.subject}`,
+        html: emailHtml,
+        text: `New Feedback from ${feedback.name || 'Anonymous'}\n\nCategory: ${feedback.category || 'General'}\nSubject: ${feedback.subject}\nRating: ${feedback.rating || 'N/A'}\n\nMessage:\n${feedback.message}`
+      });
+      
+      if (emailSent) {
+        logger.info(`Feedback email sent to ${feedbackEmailAddress}`, { feedbackId: feedback.id });
+      } else {
+        logger.warn(`Failed to send feedback email to ${feedbackEmailAddress}`, { feedbackId: feedback.id });
+      }
+      
+      res.status(201).json({
+        success: true,
+        message: "Thank you for your feedback! We'll review it and get back to you soon.",
+        feedbackId: feedback.id
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to submit feedback", { error: errorMessage });
+      
+      res.status(500).json({ 
+        success: false,
+        message: "Failed to submit feedback. Please try again later.",
+        error: errorMessage 
+      });
+    }
+  });
+
+  // Get all feedback (admin only - for future use)
+  app.get("/api/feedback", async (req: Request, res: Response) => {
+    try {
+      const allFeedback = await storage.getAllFeedback();
+      
+      res.status(200).json(allFeedback);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to retrieve feedback", { error: errorMessage });
+      
+      res.status(500).json({ 
+        message: "Failed to retrieve feedback",
+        error: errorMessage 
+      });
+    }
+  });
+
+  // Customer Management API Routes
+  app.get("/api/customers", async (req: Request, res: Response) => {
+    try {
+      // TODO: Add admin authentication check
+      const customers = await storage.getAllCustomers();
+      res.json(customers);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to get customers", { error: errorMessage });
+      res.status(500).json({ message: "Failed to get customers" });
+    }
+  });
+
+  app.get("/api/customers/:id", async (req: Request, res: Response) => {
+    try {
+      const customerId = parseInt(req.params.id);
+      const customer = await storage.getCustomerById(customerId);
+      
+      if (!customer) {
+        return res.status(404).json({ message: "Customer not found" });
+      }
+      
+      res.json(customer);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to get customer", { error: errorMessage });
+      res.status(500).json({ message: "Failed to get customer" });
+    }
+  });
+
+  app.put("/api/customers/:id", async (req: Request, res: Response) => {
+    try {
+      const customerId = parseInt(req.params.id);
+      const updates = req.body;
+      
+      const updatedCustomer = await storage.updateCustomer(customerId, updates);
+      
+      if (!updatedCustomer) {
+        return res.status(404).json({ message: "Customer not found" });
+      }
+      
+      res.json(updatedCustomer);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to update customer", { error: errorMessage });
+      res.status(500).json({ message: "Failed to update customer" });
+    }
+  });
+
+  app.get("/api/customers/:id/analytics", async (req: Request, res: Response) => {
+    try {
+      const customerId = parseInt(req.params.id);
+      const analytics = await storage.getCustomerAnalytics(customerId);
+      res.json(analytics);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to get customer analytics", { error: errorMessage });
+      res.status(500).json({ message: "Failed to get customer analytics" });
+    }
+  });
+
+  app.post("/api/customers/:id/events", async (req: Request, res: Response) => {
+    try {
+      const customerId = parseInt(req.params.id);
+      const eventData = {
+        ...req.body,
+        userId: customerId,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        platform: req.get('User-Agent')?.includes('Mobile') ? 'mobile' : 'web'
+      };
+      
+      const event = await storage.recordCustomerEvent(eventData);
+      res.json(event);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to record customer event", { error: errorMessage });
+      res.status(500).json({ message: "Failed to record customer event" });
+    }
+  });
+
+  app.get("/api/customers/status/:status", async (req: Request, res: Response) => {
+    try {
+      const status = req.params.status;
+      const customers = await storage.getCustomersByStatus(status);
+      res.json(customers);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to get customers by status", { error: errorMessage });
+      res.status(500).json({ message: "Failed to get customers by status" });
+    }
+  });
+
+  app.get("/api/customers/subscription/:status", async (req: Request, res: Response) => {
+    try {
+      const subscriptionStatus = req.params.status;
+      const customers = await storage.getCustomersBySubscriptionStatus(subscriptionStatus);
+      res.json(customers);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to get customers by subscription status", { error: errorMessage });
+      res.status(500).json({ message: "Failed to get customers by subscription status" });
+    }
+  });
+
+  app.get("/api/customers/search", async (req: Request, res: Response) => {
+    try {
+      const query = req.query.q as string;
+      if (!query) {
+        return res.status(400).json({ message: "Search query is required" });
+      }
+      
+      const customers = await storage.searchCustomers(query);
+      res.json(customers);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to search customers", { error: errorMessage });
+      res.status(500).json({ message: "Failed to search customers" });
+    }
+  });
+
+  // Timer Analytics Routes
+  app.post("/api/timer/record-session", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const sessionData = req.body;
+      
+      // Validate required fields
+      if (!sessionData.timerType || !sessionData.durationMinutes) {
+        return res.status(400).json({ 
+          message: "Timer type and duration are required" 
+        });
+      }
+      
+      // Calculate early completion percentage if completed early
+      let earlyCompletionPercentage = null;
+      if (sessionData.completedEarly && sessionData.actualMinutes && sessionData.durationMinutes) {
+        earlyCompletionPercentage = Math.round(
+          ((sessionData.durationMinutes - sessionData.actualMinutes) / sessionData.durationMinutes) * 100
+        );
+      }
+      
+      const analyticsData = {
+        userId,
+        timerType: sessionData.timerType,
+        durationMinutes: sessionData.durationMinutes,
+        actualMinutes: sessionData.actualMinutes || sessionData.durationMinutes,
+        completedEarly: sessionData.completedEarly || false,
+        earlyCompletionPercentage,
+        taskTitle: sessionData.taskTitle || null,
+        startedAt: sessionData.startedAt ? new Date(sessionData.startedAt) : new Date(),
+        completedAt: new Date()
+      };
+      
+      const session = await storage.recordTimerSession(analyticsData);
+      
+      logger.info("Timer session recorded", { 
+        userId, 
+        timerType: sessionData.timerType,
+        completedEarly: sessionData.completedEarly,
+        sessionId: session.id 
+      });
+      
+      res.status(201).json({
+        success: true,
+        message: "Timer session recorded successfully",
+        session
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to record timer session", { error: errorMessage });
+      res.status(500).json({ 
+        message: "Failed to record timer session",
+        error: errorMessage 
+      });
+    }
+  });
+
+  app.get("/api/timer/analytics", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const days = parseInt(req.query.days as string) || 30;
+      
+      const analytics = await storage.getUserTimerAnalytics(userId, days);
+      
+      res.json({
+        success: true,
+        analytics,
+        period: `${days} days`,
+        totalSessions: analytics.length
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to get timer analytics", { error: errorMessage });
+      res.status(500).json({ 
+        message: "Failed to get timer analytics",
+        error: errorMessage 
+      });
+    }
+  });
+
+  app.get("/api/timer/productivity-stats", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      
+      const productivityStats = await storage.getProductivityStats(userId);
+      
+      res.json({
+        success: true,
+        ...productivityStats,
+        insights: {
+          improvementRate: productivityStats.earlyCompletions > 0 
+            ? `${Math.round((productivityStats.earlyCompletions / productivityStats.totalSessions) * 100)}% of sessions completed early`
+            : "No early completions yet",
+          efficiency: productivityStats.averageEarlyPercentage > 0
+            ? `Average ${productivityStats.averageEarlyPercentage}% time saved when completing early`
+            : "Efficiency data not available",
+          trend: productivityStats.productivityTrend
+        }
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error("Failed to get productivity stats", { error: errorMessage });
+      res.status(500).json({ 
+        message: "Failed to get productivity stats",
+        error: errorMessage 
+      });
+    }
+  });
+
+  // Chart and achievement sharing routes (mixed auth - some routes public, some protected)
+  app.use('/api/shares', sharesRouter);
+  app.use('/api/video', videoRouter);
+  app.use('/api/user/preferences', requireAuth, preferencesRouter);
+  app.use('/api/vr', vrRouter);
+  app.use('/api/ai/features', aiFeaturesRouter);
+  app.use('/api/notion', requireAuth, notionRouter);
+  app.use('/api/trello', requireAuth, trelloRouter);
+  app.use('/api/schedule-shares', requireAuth, scheduleSharesRouter);
+
+  // User Memory Management Routes for AI Context
+  app.get('/api/user/memory', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const userMemory = await storage.getUserMemory(userId);
+      
+      if (!userMemory) {
+        // Return default memory structure if none exists
+        return res.json({
+          preferredName: null,
+          personalDetails: {},
+          recentConversations: [],
+          userPreferences: {},
+          productivityInsights: {}
+        });
+      }
+      
+      res.json(userMemory);
+    } catch (error) {
+      logger.error('Error fetching user memory:', error);
+      res.status(500).json({ message: 'Failed to fetch user memory' });
+    }
+  });
+
+  app.post('/api/user/memory', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const memoryData = req.body;
+      
+      const updatedMemory = await storage.saveUserMemory(userId, memoryData);
+      res.json(updatedMemory);
+    } catch (error) {
+      logger.error('Error saving user memory:', error);
+      res.status(500).json({ message: 'Failed to save user memory' });
+    }
+  });
+
+  app.put('/api/user/memory/conversation', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const { topic, summary, keyPoints, userMood, taskContext } = req.body;
+      
+      const conversationEntry = {
+        timestamp: new Date().toISOString(),
+        topic,
+        summary,
+        keyPoints: keyPoints || [],
+        userMood,
+        taskContext
+      };
+      
+      await storage.addConversationToMemory(userId, conversationEntry);
+      res.json({ success: true });
+    } catch (error) {
+      logger.error('Error adding conversation to memory:', error);
+      res.status(500).json({ message: 'Failed to save conversation' });
+    }
+  });
+
+  app.put('/api/user/memory/name', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const { preferredName } = req.body;
+      
+      await storage.updateUserMemoryField(userId, 'preferredName', preferredName);
+      res.json({ success: true });
+    } catch (error) {
+      logger.error('Error updating preferred name:', error);
+      res.status(500).json({ message: 'Failed to update preferred name' });
+    }
+  });
+
+  // Bulk Export/Import Routes
+  app.get('/api/tasks/export', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const format = req.query.format as string || 'json';
+      
+      const userTasks = await storage.getAllTasks(userId);
+      
+      if (format === 'csv') {
+        // Convert tasks to CSV format
+        const csvHeaders = ['Title', 'Description', 'Category', 'Priority', 'Status', 'Created Date', 'Due Date', 'Completed Date'];
+        const csvRows = userTasks.map(task => [
+          `"${task.title.replace(/"/g, '""')}"`,
+          `""`,  // description field doesn't exist
+          `"${task.category}"`,
+          `"${task.priority}"`,
+          `"${task.completed ? 'Completed' : 'Pending'}"`,
+          `"${task.createdAt?.toISOString() || ''}"`,
+          `"${task.scheduledDate?.toISOString() || ''}"`,
+          `"${task.completedAt?.toISOString() || ''}"`
+        ]);
+        
+        const csvContent = [csvHeaders.join(','), ...csvRows.map(row => row.join(','))].join('\n');
+        
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename="aichecklist_tasks.csv"');
+        res.send(csvContent);
+      } else {
+        // JSON format
+        const exportData = {
+          exportDate: new Date().toISOString(),
+          source: 'AICHECKLIST',
+          version: '1.0',
+          totalTasks: userTasks.length,
+          tasks: userTasks.map(task => ({
+            title: task.title,
+            // description field doesn't exist on Task type
+            category: task.category,
+            priority: task.priority,
+            completed: task.completed,
+            createdAt: task.createdAt,
+            scheduledDate: task.scheduledDate,
+            completedAt: task.completedAt,
+            timer: task.timer,
+            isRecurring: task.isRecurring
+          }))
+        };
+        
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Content-Disposition', 'attachment; filename="aichecklist_tasks.json"');
+        res.json(exportData);
+      }
+    } catch (error) {
+      handleRouteError(error, req, res, 'Export tasks');
+    }
+  });
+
+  app.post('/api/tasks/import', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const { tasks, format } = req.body;
+      
+      if (!tasks || !Array.isArray(tasks)) {
+        return res.status(400).json({ message: 'Invalid tasks data' });
+      }
+      
+      let importedCount = 0;
+      let skippedCount = 0;
+      const errors: string[] = [];
+      
+      for (const taskData of tasks) {
+        try {
+          // Validate and sanitize task data
+          const validatedTask = {
+            title: String(taskData.title || '').trim(),
+            description: String(taskData.description || '').trim(),
+            category: String(taskData.category || 'Personal').trim(),
+            priority: ['Low', 'Medium', 'High'].includes(taskData.priority) ? taskData.priority : 'Medium',
+            completed: Boolean(taskData.completed),
+            dueDate: taskData.dueDate ? new Date(taskData.dueDate) : null,
+            timer: taskData.timer ? Number(taskData.timer) : null,
+            recurring: taskData.recurring || null
+          };
+          
+          if (!validatedTask.title) {
+            skippedCount++;
+            errors.push(`Skipped task with empty title`);
+            continue;
+          }
+          
+          await storage.createTask(userId, validatedTask);
+          importedCount++;
+        } catch (taskError) {
+          skippedCount++;
+          errors.push(`Failed to import task "${taskData.title}": ${taskError instanceof Error ? taskError.message : 'Unknown error'}`);
+        }
+      }
+      
+      res.json({ 
+        message: `Import completed: ${importedCount} tasks imported, ${skippedCount} skipped`,
+        imported: importedCount,
+        skipped: skippedCount,
+        errors: errors.slice(0, 10) // Limit error messages
+      });
+    } catch (error) {
+      handleRouteError(error, req, res, 'Import tasks');
+    }
+  });
+
+  // Notification routes
+  app.get('/api/notifications', requireAuth, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const includeRead = req.query.includeRead === 'true';
+      
+      const userNotifications = await notificationService.getUserNotifications(userId, includeRead);
+      
+      res.json(userNotifications);
+    } catch (error) {
+      logger.error('Error fetching notifications', { error, userId: (req as any).userId });
+      res.status(500).json({ message: 'Failed to fetch notifications' });
+    }
+  });
+
+  app.put('/api/notifications/:id/read', requireAuth, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const notificationId = parseInt(req.params.id);
+      
+      await notificationService.markAsRead(notificationId, userId);
+      
+      res.json({ success: true });
+    } catch (error) {
+      logger.error('Error marking notification as read', { error, notificationId: req.params.id, userId: (req as any).userId });
+      res.status(500).json({ message: 'Failed to mark notification as read' });
+    }
+  });
+
+  // Trigger calendar reminders manually (for testing)
+  app.post('/api/notifications/calendar-reminders', requireAuth, async (req, res) => {
+    try {
+      const remindersCreated = await notificationService.createCalendarReminders();
+      
+      res.json({ 
+        success: true, 
+        remindersCreated,
+        message: `Created ${remindersCreated} calendar reminders` 
+      });
+    } catch (error) {
+      logger.error('Error creating calendar reminders', { error });
+      res.status(500).json({ message: 'Failed to create calendar reminders' });
+    }
+  });
+
+  // Inbox routes (messages/threads - separate from general notifications)
+  app.get('/api/inbox/unread-thread-count', requireAuth, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const count = await storage.getUnreadThreadNotificationCount(userId);
+      res.json({ count });
+    } catch (error) {
+      logger.error('Error fetching unread thread count', { error, userId: (req as any).userId });
+      res.status(500).json({ message: 'Failed to fetch unread count' });
+    }
+  });
+
+  app.get('/api/inbox/thread-notifications', requireAuth, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const limit = Math.min(parseInt(String(req.query.limit ?? '20'), 10) || 20, 50);
+      const unreadOnly = String(req.query.unreadOnly ?? 'true') !== 'false';
+
+      const threads = await storage.listThreadNotifications({ userId, limit, unreadOnly });
+      res.json({ threads });
+    } catch (error) {
+      logger.error('Error fetching thread notifications', { error, userId: (req as any).userId });
+      res.status(500).json({ message: 'Failed to fetch inbox' });
+    }
+  });
+
+  app.get('/api/inbox/thread/:threadId/messages', requireAuth, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const threadId = parseInt(req.params.threadId, 10);
+
+      if (isNaN(threadId)) {
+        return res.status(400).json({ message: 'Invalid thread ID' });
+      }
+
+      const result = await storage.getThread(threadId, userId);
+      if (!result) {
+        return res.status(404).json({ message: 'Thread not found or access denied' });
+      }
+      res.json({ thread: result.thread, messages: result.messages });
+    } catch (error) {
+      logger.error('Error fetching thread messages', { error, userId: (req as any).userId });
+      res.status(500).json({ message: 'Failed to fetch thread messages' });
+    }
+  });
+
+  app.post('/api/inbox/thread/:threadId/read', requireAuth, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const threadId = parseInt(req.params.threadId, 10);
+
+      if (isNaN(threadId)) {
+        return res.status(400).json({ message: 'Invalid thread ID' });
+      }
+
+      await storage.markThreadRead(threadId, userId);
+      res.json({ success: true });
+    } catch (error) {
+      logger.error('Error marking thread as read', { error, userId: (req as any).userId });
+      res.status(500).json({ message: 'Failed to mark thread as read' });
+    }
+  });
+
+  // User preferences routes (for achievement and data collection settings)
+  app.get('/api/user/preferences', requireAuth, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const user = await storage.getCustomerById(userId);
+      
+      if (!user) {
+        return res.status(404).json({ message: 'User not found' });
+      }
+      
+      // Return user preferences for achievements and data collection
+      const preferences = {
+        achievementsEnabled: user.achievementsEnabled ?? true,
+        dataCollectionConsent: user.dataCollectionConsent ?? false,
+      };
+      
+      res.json(preferences);
+    } catch (error) {
+      logger.error('Error fetching user preferences', { error, userId: (req as any).userId });
+      res.status(500).json({ message: 'Failed to fetch user preferences' });
+    }
+  });
+
+  app.patch('/api/user/preferences', requireAuth, async (req, res) => {
+    try {
+      const userId = (req as any).userId;
+      const { achievementsEnabled, dataCollectionConsent } = req.body;
+      
+      // Update user preferences
+      const updateData: any = {
+        updatedAt: new Date()
+      };
+      
+      if (achievementsEnabled !== undefined) {
+        updateData.achievementsEnabled = achievementsEnabled;
+      }
+      if (dataCollectionConsent !== undefined) {
+        updateData.dataCollectionConsent = dataCollectionConsent;
+      }
+
+      const [updatedUser] = await db.update(users)
+        .set(updateData)
+        .where(eq(users.id, userId))
+        .returning();
+      
+      if (!updatedUser) {
+        return res.status(404).json({ message: 'User not found' });
+      }
+      
+      logger.info('User preferences updated successfully', { 
+        userId, 
+        achievementsEnabled: updatedUser.achievementsEnabled,
+        dataCollectionConsent: updatedUser.dataCollectionConsent 
+      });
+      
+      res.json({ 
+        success: true,
+        achievementsEnabled: updatedUser.achievementsEnabled,
+        dataCollectionConsent: updatedUser.dataCollectionConsent
+      });
+    } catch (error) {
+      logger.error('Error updating user preferences', { error, userId: (req as any).userId });
+      res.status(500).json({ message: 'Failed to update user preferences' });
+    }
+  });
+
+  // Template routes - maintaining clean, professional design
+  app.get('/api/templates', async (req: Request, res: Response) => {
+    try {
+      const templates = await storage.getTemplates();
+      res.json(templates);
+    } catch (error) {
+      handleRouteError(error, req, res, "Get templates");
+    }
+  });
+
+  app.post('/api/templates/use/:id', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const templateId = parseInt(req.params.id);
+      const userId = (req as any).userId;
+      const { mode = "template" } = req.body; // Default to template mode
+      
+      // Trial/Subscription enforcement for Templates (premium feature)
+      const templateUser = await storage.getUserById(userId);
+      if (templateUser) {
+        const now = new Date();
+        const subscriptionStatus = templateUser.subscriptionStatus;
+        const trialEndsAt = templateUser.trialEndsAt ? new Date(templateUser.trialEndsAt) : null;
+        
+        // Check if user has active subscription
+        const hasActiveSubscription = subscriptionStatus === 'active' || subscriptionStatus === 'paid';
+        
+        // Check if user is in active trial
+        const hasActiveTrial = subscriptionStatus === 'trial' && trialEndsAt && trialEndsAt > now;
+        
+        // If neither active subscription nor active trial, block template usage
+        if (!hasActiveSubscription && !hasActiveTrial) {
+          logger.info('Templates blocked - trial expired', { userId, subscriptionStatus });
+          return res.status(402).json({
+            message: "Templates are a premium feature. Upgrade to access 200+ productivity templates!",
+            trialExpired: true,
+            upgradeRequired: true
+          });
+        }
+      }
+      
+      const template = await storage.getTemplate(templateId);
+      if (!template) {
+        return res.status(404).json({ message: "Template not found" });
+      }
+
+      let createdTasks = [];
+      
+      if (mode === "checklist") {
+        // Create ONE task with all template items as checklist items
+        const checklistItems = template.tasks.map((templateTask: any, index: number) => ({
+          id: `item_${Date.now()}_${index}`,
+          text: templateTask.title,
+          completed: false
+        }));
+        
+        // Use the first task's properties for the main task, or sensible defaults
+        const firstTask: any = template.tasks[0] || {};
+        const scheduledDate = firstTask.scheduledDaysFromNow 
+          ? new Date(Date.now() + firstTask.scheduledDaysFromNow * 24 * 60 * 60 * 1000)
+          : null;
+        
+        const mainTask = await storage.createTask({
+          title: `${template.name} Checklist`,
+          category: firstTask.category || "Personal",
+          priority: firstTask.priority || "Medium",
+          userId: userId,
+          completed: false,
+          timer: firstTask.timer || null,
+          youtubeUrl: null,
+          scheduledDate: scheduledDate,
+          isRecurring: false,
+          recurringFrequency: null,
+          recurringInterval: null,
+          parentTaskId: null,
+          checklistItems: checklistItems,
+          displayOrder: 0,
+          completedAt: null,
+          nextDueDate: null,
+          endDate: null,
+          daysOfWeek: null,
+          dayOfMonth: null,
+          monthOfYear: null,
+          archived: false,
+          archivedAt: null
+        });
+        
+        createdTasks.push(mainTask);
+        
+      } else {
+        // Original behavior: Create separate tasks for each template item
+        for (const templateTask of template.tasks) {
+          const scheduledDate = templateTask.scheduledDaysFromNow 
+            ? new Date(Date.now() + templateTask.scheduledDaysFromNow * 24 * 60 * 60 * 1000)
+            : null;
+
+          const task = await storage.createTask({
+            title: templateTask.title,
+            category: templateTask.category,
+            priority: templateTask.priority,
+            userId: userId,
+            completed: false,
+            timer: templateTask.timer || null,
+            youtubeUrl: null,
+            scheduledDate: scheduledDate,
+            isRecurring: false,
+            recurringFrequency: null,
+            recurringInterval: null,
+            parentTaskId: null,
+            checklistItems: [],
+            displayOrder: 0,
+            completedAt: null,
+            nextDueDate: null,
+            endDate: null,
+            daysOfWeek: null,
+            dayOfMonth: null,
+            monthOfYear: null,
+            archived: false,
+            archivedAt: null
+          });
+          createdTasks.push(task);
+        }
+      }
+
+      // Increment usage count and record usage history
+      await storage.incrementTemplateUsage(templateId);
+      await storage.recordTemplateUsage(userId, templateId, template.name);
+      
+      const message = mode === "checklist" 
+        ? `Created checklist task with ${template.tasks.length} items from template`
+        : `Created ${createdTasks.length} tasks from template`;
+        
+      res.json({ createdTasks, message });
+    } catch (error) {
+      handleRouteError(error, req, res, "Use template");
+    }
+  });
+
+  app.post('/api/templates/save', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const { name, description, category, taskIds } = req.body;
+      
+      if (!name || !taskIds || !Array.isArray(taskIds)) {
+        return res.status(400).json({ message: "Name and task IDs are required" });
+      }
+
+      // Get selected tasks and convert to template format
+      const selectedTasks = await storage.getTasksByIds(taskIds, userId);
+      const templateTasks = selectedTasks.map(task => ({
+        title: task.title,
+        category: task.category,
+        priority: task.priority as any,
+        timer: task.timer,
+        description: undefined
+      }));
+
+      const template = await storage.createTemplate({
+        name,
+        description: description || `Custom template with ${templateTasks.length} tasks`,
+        category: category || 'Personal',
+        tasks: templateTasks,
+        isPublic: false,
+        createdByUserId: userId,
+        tags: []
+      });
+
+      res.json({ template, message: "Template saved successfully" });
+    } catch (error) {
+      handleRouteError(error, req, res, "Save template");
+    }
+  });
+
+  // DELETE endpoint for quick template removal
+  app.delete('/api/templates/:id', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const templateId = parseInt(req.params.id);
+
+      if (isNaN(templateId)) {
+        return res.status(400).json({ message: 'Invalid template ID' });
+      }
+
+      // Only allow deletion of user-created templates
+      const deleted = await storage.deleteUserTemplate(templateId, userId);
+      
+      if (!deleted) {
+        return res.status(404).json({ message: 'Template not found or not authorized to delete' });
+      }
+
+      res.json({ success: true, message: 'Template deleted successfully' });
+    } catch (error) {
+      handleRouteError(error, req, res, "Delete template");
+    }
+  });
+
+  // Template Favorites endpoints
+  app.get('/api/templates/favorites', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const favoriteIds = await storage.getTemplateFavorites(userId);
+      res.json({ favoriteIds });
+    } catch (error) {
+      handleRouteError(error, req, res, "Get template favorites");
+    }
+  });
+
+  app.post('/api/templates/favorites/:id', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const templateId = parseInt(req.params.id);
+
+      if (isNaN(templateId)) {
+        return res.status(400).json({ message: 'Invalid template ID' });
+      }
+
+      await storage.addTemplateFavorite(userId, templateId);
+      res.json({ success: true, message: 'Template added to favorites' });
+    } catch (error) {
+      handleRouteError(error, req, res, "Add template favorite");
+    }
+  });
+
+  app.delete('/api/templates/favorites/:id', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const templateId = parseInt(req.params.id);
+
+      if (isNaN(templateId)) {
+        return res.status(400).json({ message: 'Invalid template ID' });
+      }
+
+      await storage.removeTemplateFavorite(userId, templateId);
+      res.json({ success: true, message: 'Template removed from favorites' });
+    } catch (error) {
+      handleRouteError(error, req, res, "Remove template favorite");
+    }
+  });
+
+  // Template Usage History endpoint
+  app.get('/api/templates/history', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const limit = parseInt(req.query.limit as string) || 20;
+      const history = await storage.getTemplateUsageHistory(userId, limit);
+      res.json({ history });
+    } catch (error) {
+      handleRouteError(error, req, res, "Get template history");
+    }
+  });
+
+  // Print endpoint for generating professional reports
+  app.post('/api/print', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const { request } = req.body;
+
+      if (!request) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Print request is required' 
+        });
+      }
+
+      // Import printingService
+      const { printingService } = await import('./printingService');
+      
+      // Handle the print request using the printing service
+      const printResult = await printingService.handlePrintRequest(request, userId);
+      
+      if (printResult.success) {
+        res.json({
+          success: true,
+          title: printResult.title,
+          content: printResult.content
+        });
+      } else {
+        res.status(500).json({
+          success: false,
+          error: printResult.error || 'Failed to generate report'
+        });
+      }
+    } catch (error) {
+      console.error('Print endpoint error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Internal server error while generating report'
+      });
+    }
+  });
+
+  // AIDOMO Clip/Bookmark endpoint - save pages and selections from browser extension
+  app.post("/api/aidomo/clip", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const { type, url, title, content, description } = req.body;
+      
+      if (!url || !title) {
+        return res.status(400).json({ error: 'URL and title are required' });
+      }
+      
+      // Create a task/note with the clipped content
+      const taskTitle = type === 'file' 
+        ? `📎 Clipped: ${title.substring(0, 50)}`
+        : `🔖 Bookmark: ${title.substring(0, 50)}`;
+      
+      const taskNotes = [
+        `**Source:** ${url}`,
+        description ? `**Description:** ${description}` : '',
+        content ? `\n---\n${content.substring(0, 2000)}${content.length > 2000 ? '...' : ''}` : ''
+      ].filter(Boolean).join('\n');
+      
+      const task = await storage.createTask({
+        userId,
+        title: taskTitle,
+        notes: taskNotes,
+        completed: false,
+        priority: 'medium',
+        tags: type === 'file' ? ['clipped', 'file'] : ['bookmark'],
+        dueDate: null,
+        dueTime: null,
+        position: 0
+      });
+      
+      logger.info("Created clipped content task", { userId, type, url: url.substring(0, 50) });
+      
+      res.json({ 
+        success: true, 
+        message: type === 'file' ? 'Content saved to your tasks' : 'Page bookmarked',
+        taskId: task.id
+      });
+    } catch (error) {
+      logger.error("Error clipping content", { error });
+      res.status(500).json({ error: 'Failed to save clipped content' });
+    }
+  });
+
+  // AIDOMO Conversation Management Routes
+  
+  // Get user's AIDOMO conversations
+  app.get("/api/aidomo/conversations", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const conversations = await storage.getUserAidomoConversations(userId);
+      
+      logger.info("Retrieved user AIDOMO conversations", { userId, count: conversations.length });
+      res.json(conversations);
+    } catch (error) {
+      logger.error("Error retrieving AIDOMO conversations", { error });
+      res.status(500).json({ message: "Failed to retrieve conversations" });
+    }
+  });
+
+  // Create new AIDOMO conversation
+  app.post("/api/aidomo/conversations", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const { title, messages: inputMessages } = req.body;
+      
+      // Use provided messages or default to empty array
+      const messages = Array.isArray(inputMessages) ? inputMessages : [];
+      
+      const sessionId = uuidv4();
+      const conversationData = {
+        userId,
+        sessionId,
+        title: title || "New Conversation",
+        messages: messages,
+        totalMessages: messages.length,
+        totalTokensUsed: messages.reduce((total: number, m: any) => total + (m.tokensUsed || 0), 0),
+        lastMessageAt: new Date(),
+        isArchived: false,
+      };
+      
+      const conversation = await storage.createAidomoConversation(conversationData);
+      
+      logger.info("Created new AIDOMO conversation", { sessionId, userId, title, messageCount: messages.length });
+      res.json(conversation);
+    } catch (error) {
+      logger.error("Error creating AIDOMO conversation", { error });
+      res.status(500).json({ message: "Failed to create conversation" });
+    }
+  });
+
+  // Get specific AIDOMO conversation
+  app.get("/api/aidomo/conversations/:sessionId", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const { sessionId } = req.params;
+      
+      const conversation = await storage.getAidomoConversation(sessionId, userId);
+      
+      if (!conversation) {
+        return res.status(404).json({ message: "Conversation not found" });
+      }
+      
+      res.json(conversation);
+    } catch (error) {
+      logger.error("Error retrieving AIDOMO conversation", { error });
+      res.status(500).json({ message: "Failed to retrieve conversation" });
+    }
+  });
+
+  // Update AIDOMO conversation messages (replace entire message array)
+  app.post("/api/aidomo/conversations/:sessionId/messages", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const { sessionId } = req.params;
+      const { messages } = req.body;
+      
+      if (!messages || !Array.isArray(messages)) {
+        return res.status(400).json({ message: "Messages array is required" });
+      }
+      
+      // Verify conversation belongs to user or create it
+      let conversation = await storage.getAidomoConversation(sessionId, userId);
+      if (!conversation) {
+        return res.status(404).json({ message: "Conversation not found" });
+      }
+      
+      // Update conversation with new messages
+      await storage.updateAidomoConversationMessages(sessionId, messages);
+      
+      logger.info("Updated AIDOMO conversation messages", { sessionId, messageCount: messages.length });
+      res.json({ success: true, message: "Conversation updated" });
+    } catch (error) {
+      logger.error("Error updating conversation messages", { error });
+      res.status(500).json({ message: "Failed to update messages" });
+    }
+  });
+
+  // Archive AIDOMO conversation
+  app.put("/api/aidomo/conversations/:sessionId/archive", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const { sessionId } = req.params;
+      
+      const success = await storage.archiveAidomoConversation(sessionId, userId);
+      
+      if (!success) {
+        return res.status(404).json({ message: "Conversation not found" });
+      }
+      
+      logger.info("Archived AIDOMO conversation", { sessionId, userId });
+      res.json({ success: true, message: "Conversation archived" });
+    } catch (error) {
+      logger.error("Error archiving conversation", { error });
+      res.status(500).json({ message: "Failed to archive conversation" });
+    }
+  });
+
+  // Delete AIDOMO conversation
+  app.delete("/api/aidomo/conversations/:sessionId", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const { sessionId } = req.params;
+      
+      const success = await storage.deleteAidomoConversation(sessionId, userId);
+      
+      if (!success) {
+        return res.status(404).json({ message: "Conversation not found" });
+      }
+      
+      logger.info("Deleted AIDOMO conversation", { sessionId, userId });
+      res.json({ success: true, message: "Conversation deleted" });
+    } catch (error) {
+      logger.error("Error deleting conversation", { error });
+      res.status(500).json({ message: "Failed to delete conversation" });
+    }
+  });
+
+  // AIDOMO Token Management Routes
+  
+  // Get user's AIDOMO token status
+  app.get("/api/aidomo/tokens", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const tokens = await storage.getUserAidomoTokens(userId);
+      
+      // Calculate available tokens
+      const availableTokens = tokens.monthlyLimit + tokens.bonusTokens - tokens.currentUsage;
+      
+      const tokenStatus = {
+        ...tokens,
+        availableTokens,
+        percentUsed: Math.round((tokens.currentUsage / (tokens.monthlyLimit + tokens.bonusTokens)) * 100),
+      };
+      
+      logger.info("Retrieved user AIDOMO tokens", { userId, availableTokens });
+      res.json(tokenStatus);
+    } catch (error) {
+      logger.error("Error retrieving AIDOMO tokens", { error });
+      res.status(500).json({ message: "Failed to retrieve token status" });
+    }
+  });
+
+  // Check if user has enough tokens for a request
+  app.post("/api/aidomo/tokens/check", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const { tokensNeeded } = req.body;
+      
+      if (!tokensNeeded || tokensNeeded <= 0) {
+        return res.status(400).json({ message: "Valid tokensNeeded value is required" });
+      }
+      
+      const hasEnoughTokens = await storage.checkTokenLimit(userId, tokensNeeded);
+      const userTokens = await storage.getUserAidomoTokens(userId);
+      const availableTokens = userTokens.monthlyLimit + userTokens.bonusTokens - userTokens.currentUsage;
+      
+      res.json({ 
+        hasEnoughTokens,
+        tokensNeeded,
+        availableTokens,
+        message: hasEnoughTokens ? "Sufficient tokens available" : "Insufficient tokens"
+      });
+    } catch (error) {
+      logger.error("Error checking token limit", { error });
+      res.status(500).json({ message: "Failed to check token limit" });
+    }
+  });
+
+  // Add bonus tokens to user account (admin only)
+  app.post("/api/aidomo/tokens/bonus", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const { bonusTokens, targetUserId } = req.body;
+      
+      // Check if user is admin
+      const user = await storage.getUserById(userId);
+      if (!user || (user as any).role !== 'admin') {
+        return res.status(403).json({ message: "Admin privileges required" });
+      }
+      
+      if (!bonusTokens || bonusTokens <= 0) {
+        return res.status(400).json({ message: "Valid bonusTokens value is required" });
+      }
+      
+      const recipientUserId = targetUserId || userId;
+      await storage.addBonusTokens(recipientUserId, bonusTokens);
+      
+      logger.info("Added bonus AIDOMO tokens", { recipientUserId, bonusTokens, adminUserId: userId });
+      res.json({ success: true, message: `Added ${bonusTokens} bonus tokens` });
+    } catch (error) {
+      logger.error("Error adding bonus tokens", { error });
+      res.status(500).json({ message: "Failed to add bonus tokens" });
+    }
+  });
+
+  // Reset monthly tokens (admin only)
+  app.post("/api/aidomo/tokens/reset", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const { targetUserId } = req.body;
+      
+      // Check if user is admin
+      const user = await storage.getUserById(userId);
+      if (!user || (user as any).role !== 'admin') {
+        return res.status(403).json({ message: "Admin privileges required" });
+      }
+      
+      const recipientUserId = targetUserId || userId;
+      await storage.resetMonthlyTokens(recipientUserId);
+      
+      logger.info("Reset monthly AIDOMO tokens", { recipientUserId, adminUserId: userId });
+      res.json({ success: true, message: "Monthly tokens reset" });
+    } catch (error) {
+      logger.error("Error resetting monthly tokens", { error });
+      res.status(500).json({ message: "Failed to reset monthly tokens" });
+    }
+  });
+
+  // Calendar conflict resolution endpoints
+  // Get all calendar events for a specific date
+  app.get("/api/calendar/events", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const { date } = req.query;
+      
+      if (!date) {
+        return res.status(400).json({ message: "Date parameter is required" });
+      }
+      
+      const events = await storage.getEventsByDate(userId, new Date(date as string));
+      
+      logger.info("Retrieved calendar events", { userId, date, count: events.length });
+      res.json(events);
+    } catch (error) {
+      logger.error("Error getting calendar events", { error });
+      res.status(500).json({ message: "Failed to get calendar events" });
+    }
+  });
+
+  // Detect calendar conflicts for a specific date
+  app.post("/api/calendar/conflicts/detect", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const { date, eventId, time } = req.body;
+      
+      if (!date) {
+        return res.status(400).json({ message: "Date is required" });
+      }
+      
+      const conflicts = await storage.detectCalendarConflicts(
+        userId, 
+        new Date(date),
+        eventId,
+        time ? new Date(time) : undefined
+      );
+      
+      logger.info("Detected calendar conflicts", { 
+        userId, 
+        date, 
+        conflictCount: conflicts.conflicts.length 
+      });
+      
+      res.json(conflicts);
+    } catch (error) {
+      logger.error("Error detecting calendar conflicts", { error });
+      res.status(500).json({ message: "Failed to detect calendar conflicts" });
+    }
+  });
+
+  // Suggest rescheduling options for conflicts
+  app.post("/api/calendar/reschedule/suggest", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const { date, target, constraints, preferences } = req.body;
+      
+      if (!date) {
+        return res.status(400).json({ message: "Date is required" });
+      }
+      
+      const proposals = await storage.suggestRescheduling(
+        userId,
+        new Date(date),
+        { target, constraints, preferences }
+      );
+      
+      logger.info("Generated rescheduling proposals", { 
+        userId, 
+        date, 
+        proposalCount: proposals.length 
+      });
+      
+      res.json({ proposals });
+    } catch (error) {
+      logger.error("Error suggesting rescheduling", { error });
+      res.status(500).json({ message: "Failed to suggest rescheduling" });
+    }
+  });
+
+  // Apply rescheduling changes
+  app.post("/api/calendar/reschedule/apply", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const { changes } = req.body;
+      
+      if (!changes || !Array.isArray(changes)) {
+        return res.status(400).json({ message: "Changes array is required" });
+      }
+      
+      // Validate changes format
+      for (const change of changes) {
+        if (!change.id || !change.scheduledDate) {
+          return res.status(400).json({ message: "Each change must have id and scheduledDate" });
+        }
+      }
+      
+      // Convert dates
+      const formattedChanges = changes.map(c => ({
+        id: c.id,
+        scheduledDate: new Date(c.scheduledDate),
+        scheduledEnd: c.scheduledEnd ? new Date(c.scheduledEnd) : undefined
+      }));
+      
+      const updatedTasks = await storage.applyRescheduling(userId, formattedChanges);
+      
+      logger.info("Applied rescheduling changes", { 
+        userId, 
+        changesCount: changes.length 
+      });
+      
+      res.json({ updated: updatedTasks });
+    } catch (error) {
+      logger.error("Error applying rescheduling", { error });
+      res.status(500).json({ message: "Failed to apply rescheduling" });
+    }
+  });
+
+  // Update a single task's scheduling information
+  app.patch("/api/tasks/:id/schedule", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const taskId = req.params.id;
+      const { scheduledDate, scheduledEnd, durationMin, bufferBeforeMin, bufferAfterMin, isFixed } = req.body;
+      
+      const updates: any = {};
+      if (scheduledDate !== undefined) updates.scheduledDate = new Date(scheduledDate);
+      if (scheduledEnd !== undefined) updates.scheduledEnd = new Date(scheduledEnd);
+      if (durationMin !== undefined) updates.durationMin = durationMin;
+      if (bufferBeforeMin !== undefined) updates.bufferBeforeMin = bufferBeforeMin;
+      if (bufferAfterMin !== undefined) updates.bufferAfterMin = bufferAfterMin;
+      if (isFixed !== undefined) updates.isFixed = isFixed;
+      
+      const updatedTask = await storage.updateTask(taskId, updates);
+      
+      if (!updatedTask) {
+        return res.status(404).json({ message: "Task not found" });
+      }
+      
+      logger.info("Updated task schedule", { userId, taskId });
+      res.json(updatedTask);
+    } catch (error) {
+      logger.error("Error updating task schedule", { error });
+      res.status(500).json({ message: "Failed to update task schedule" });
+    }
+  });
+
+  // Analytics API endpoints
+  
+  // Track page views and events
+  app.post("/api/analytics/track", async (req: Request, res: Response) => {
+    try {
+      const { action, category, label, value, sessionId, visitorId, timestamp, url, userAgent } = req.body;
+      const userId = (req as any).userId;
+      const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+      
+      // Track as an event - silently fail if table doesn't exist
+      try {
+        await storage.trackEvent({
+          userId,
+          eventType: action,
+          eventData: { category, label, value, url },
+          sessionId,
+          ipAddress: ip as string,
+          userAgent,
+          platform: 'web',
+        });
+      } catch (trackError) {
+        // Silently ignore if analytics table doesn't exist
+      }
+      
+      // Track page view if it's a page view event - silently fail if table doesn't exist
+      if (action === 'page_view' && url) {
+        try {
+          const path = new URL(url).pathname;
+          await storage.trackPageView({
+            sessionId,
+            visitorId,
+            userId,
+            path,
+            title: label,
+            referrer: req.headers.referer,
+          });
+        } catch (trackError) {
+          // Silently ignore if analytics table doesn't exist
+        }
+      }
+      
+      res.json({ success: true });
+    } catch (error) {
+      // Return success even if analytics fails - don't break the app
+      res.json({ success: true });
+    }
+  });
+  
+  // Create visitor session
+  app.post("/api/analytics/session", async (req: Request, res: Response) => {
+    try {
+      const { visitorId } = req.body;
+      const userId = (req as any).userId;
+      const userAgent = req.headers['user-agent'];
+      const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+      
+      // Parse user agent for device info
+      const isMobile = /mobile/i.test(userAgent || '');
+      const isTablet = /tablet/i.test(userAgent || '');
+      const device = isTablet ? 'tablet' : isMobile ? 'mobile' : 'desktop';
+      
+      const sessionId = await storage.createVisitorSession({
+        visitorId,
+        userId,
+        ipAddress: ip as string,
+        userAgent,
+        referrer: req.headers.referer,
+        landingPage: req.headers.referer || '/',
+        device,
+      });
+      
+      res.json({ sessionId });
+    } catch (error) {
+      logger.error("Error creating session", { error });
+      res.status(500).json({ error: "Failed to create session" });
+    }
+  });
+  
+  // Get analytics dashboard (admin only)
+  app.get("/api/analytics/dashboard", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      
+      // Check if user is admin
+      const user = await storage.getUserById(userId);
+      if (!user || (user as any).role !== 'admin') {
+        return res.status(403).json({ message: "Admin privileges required" });
+      }
+      
+      const dashboard = await storage.getAnalyticsDashboard();
+      res.json(dashboard);
+    } catch (error) {
+      logger.error("Error getting analytics dashboard", { error });
+      res.status(500).json({ message: "Failed to get analytics dashboard" });
+    }
+  });
+  
+  // Get site analytics for date range (admin only)
+  app.get("/api/analytics/site", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      
+      // Check if user is admin
+      const user = await storage.getUserById(userId);
+      if (!user || (user as any).role !== 'admin') {
+        return res.status(403).json({ message: "Admin privileges required" });
+      }
+      
+      const { startDate, endDate } = req.query;
+      
+      if (!startDate || !endDate) {
+        return res.status(400).json({ message: "Start date and end date are required" });
+      }
+      
+      const analytics = await storage.getSiteAnalytics(
+        new Date(startDate as string),
+        new Date(endDate as string)
+      );
+      
+      res.json(analytics);
+    } catch (error) {
+      logger.error("Error getting site analytics", { error });
+      res.status(500).json({ message: "Failed to get site analytics" });
+    }
+  });
+  
+  // Get visitor sessions (admin only)
+  app.get("/api/analytics/sessions", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      
+      // Check if user is admin
+      const user = await storage.getUserById(userId);
+      if (!user || (user as any).role !== 'admin') {
+        return res.status(403).json({ message: "Admin privileges required" });
+      }
+      
+      const { startDate, endDate, isLoggedIn } = req.query;
+      
+      const filters: any = {};
+      if (startDate) filters.startDate = new Date(startDate as string);
+      if (endDate) filters.endDate = new Date(endDate as string);
+      if (isLoggedIn !== undefined) filters.isLoggedIn = isLoggedIn === 'true';
+      
+      const sessions = await storage.getVisitorSessions(filters);
+      res.json(sessions);
+    } catch (error) {
+      logger.error("Error getting visitor sessions", { error });
+      res.status(500).json({ message: "Failed to get visitor sessions" });
+    }
+  });
+  
+  // Get page views (admin only)
+  app.get("/api/analytics/pageviews", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      
+      // Check if user is admin
+      const user = await storage.getUserById(userId);
+      if (!user || (user as any).role !== 'admin') {
+        return res.status(403).json({ message: "Admin privileges required" });
+      }
+      
+      const { sessionId } = req.query;
+      const pageviews = await storage.getPageViews(sessionId as string);
+      res.json(pageviews);
+    } catch (error) {
+      logger.error("Error getting page views", { error });
+      res.status(500).json({ message: "Failed to get page views" });
+    }
+  });
+
+  // Track user login for analytics
+  app.post("/api/analytics/login", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const { sessionId } = req.body;
+      
+      // Track login event
+      await storage.trackEvent({
+        userId,
+        eventType: 'login',
+        eventData: {},
+        sessionId,
+        platform: 'web',
+      });
+      
+      // Update visitor session to mark as logged in
+      if (sessionId) {
+        await storage.updateVisitorSession(sessionId, {
+          userId,
+          isLoggedIn: true,
+        });
+      }
+      
+      res.json({ success: true });
+    } catch (error) {
+      logger.error("Error tracking login", { error });
+      res.status(500).json({ success: false });
+    }
+  });
+
+  // Register enhanced voice authentication routes
+  registerEnhancedVoiceAuthRoutes(app);
+
+  // ==================== SCHEDULING ROUTES ====================
+  
+  // Get user's scheduling settings (authenticated)
+  app.get("/api/scheduling/settings", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      let settings = await storage.getSchedulingSettings(userId);
+      
+      // If no settings exist, create default settings
+      if (!settings) {
+        const user = await storage.getUserById(userId);
+        if (!user) {
+          return res.status(404).json({ message: "User not found" });
+        }
+        
+        // Generate a default slug from username
+        const defaultSlug = user.username.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+        
+        settings = await storage.createSchedulingSettings({
+          userId,
+          slug: defaultSlug,
+          isEnabled: false,
+          bookingWindowDays: 30,
+          minNoticeMinutes: 60,
+          slotDuration: 30,
+          availability: {
+            monday: { enabled: true, slots: [{ start: "09:00", end: "17:00" }] },
+            tuesday: { enabled: true, slots: [{ start: "09:00", end: "17:00" }] },
+            wednesday: { enabled: true, slots: [{ start: "09:00", end: "17:00" }] },
+            thursday: { enabled: true, slots: [{ start: "09:00", end: "17:00" }] },
+            friday: { enabled: true, slots: [{ start: "09:00", end: "17:00" }] },
+            saturday: { enabled: false, slots: [] },
+            sunday: { enabled: false, slots: [] },
+          },
+          meetingTitle: "Meeting",
+          meetingDescription: "",
+          timezone: user.timezone || "America/New_York",
+        });
+      }
+      
+      res.json(settings);
+    } catch (error) {
+      logger.error("Error getting scheduling settings", { error });
+      res.status(500).json({ message: "Failed to get scheduling settings" });
+    }
+  });
+
+  // Update user's scheduling settings (authenticated)
+  app.put("/api/scheduling/settings", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const updates = req.body;
+      
+      const settings = await storage.updateSchedulingSettings(userId, updates);
+      
+      if (!settings) {
+        return res.status(404).json({ message: "Scheduling settings not found" });
+      }
+      
+      res.json(settings);
+    } catch (error) {
+      logger.error("Error updating scheduling settings", { error });
+      res.status(500).json({ message: "Failed to update scheduling settings" });
+    }
+  });
+
+  // Get user's appointments (authenticated)
+  app.get("/api/scheduling/appointments", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const appointments = await storage.getUserAppointments(userId);
+      res.json(appointments);
+    } catch (error) {
+      logger.error("Error getting appointments", { error });
+      res.status(500).json({ message: "Failed to get appointments" });
+    }
+  });
+
+  // Update appointment status (authenticated)
+  app.patch("/api/scheduling/appointments/:id", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = (req as any).userId;
+      const { id } = req.params;
+      const { status } = req.body;
+      
+      // Verify appointment belongs to user
+      const appointment = await storage.getAppointment(id);
+      if (!appointment) {
+        return res.status(404).json({ message: "Appointment not found" });
+      }
+      
+      if (appointment.userId !== userId) {
+        return res.status(403).json({ message: "Unauthorized" });
+      }
+      
+      const updated = await storage.updateAppointmentStatus(id, status);
+      res.json(updated);
+    } catch (error) {
+      logger.error("Error updating appointment", { error });
+      res.status(500).json({ message: "Failed to update appointment" });
+    }
+  });
+
+  // PUBLIC: Get availability for booking (by slug)
+  app.get("/api/public/schedule/:slug", async (req: Request, res: Response) => {
+    try {
+      const { slug } = req.params;
+      const settings = await storage.getSchedulingSettingsBySlug(slug);
+      
+      if (!settings || !settings.isEnabled) {
+        return res.status(404).json({ message: "Scheduling not available" });
+      }
+      
+      // Get user info (limited data for public view)
+      const user = await storage.getUserById(settings.userId);
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      
+      // Return public-safe data
+      res.json({
+        slug: settings.slug,
+        meetingTitle: settings.meetingTitle,
+        meetingDescription: settings.meetingDescription,
+        slotDuration: settings.slotDuration,
+        availability: settings.availability,
+        blockedDates: settings.blockedDates || [],
+        blockedTimeSlots: settings.blockedTimeSlots || [],
+        timezone: settings.timezone,
+        bookingWindowDays: settings.bookingWindowDays,
+        minNoticeMinutes: settings.minNoticeMinutes,
+        hostName: user.fullName || user.username,
+        hostProfilePicture: user.profilePictureUrl,
+        username: user.username,
+        businessName: settings.meetingTitle,
+        user: {
+          brandPrimaryColor: user.brandPrimaryColor || "#16a34a",
+          brandBackgroundColor: user.brandBackgroundColor || "#ffffff",
+          brandAccentColor: user.brandAccentColor || "#16a34a",
+          appointmentPagePrimaryColor: user.appointmentPagePrimaryColor || "#16a34a",
+          appointmentPageBackgroundColor: user.appointmentPageBackgroundColor || "#ffffff",
+          appointmentPageAccentColor: user.appointmentPageAccentColor || "#16a34a",
+          appointmentPageV2PrimaryColor: user.appointmentPageV2PrimaryColor || "#16a34a",
+          appointmentPageV2BackgroundColor: user.appointmentPageV2BackgroundColor || "#ffffff",
+          appointmentPageV2AccentColor: user.appointmentPageV2AccentColor || "#16a34a",
+          appointmentPageV2CalendarBg: user.appointmentPageV2CalendarBg || "blue",
+        }
+      });
+    } catch (error) {
+      logger.error("Error getting public schedule", { error });
+      res.status(500).json({ message: "Failed to get schedule" });
+    }
+  });
+
+  // PUBLIC: Book an appointment
+  app.post("/api/public/schedule/:slug/book", async (req: Request, res: Response) => {
+    try {
+      const { slug } = req.params;
+      const { attendeeName, attendeeEmail, attendeeNotes, additionalEmails, startTime, endTime, timezone, timezoneOffset } = req.body;
+      
+      // Validate required fields
+      if (!attendeeName || !attendeeEmail || !startTime || !endTime) {
+        return res.status(400).json({ message: "Missing required fields" });
+      }
+      
+      // Get settings
+      const settings = await storage.getSchedulingSettingsBySlug(slug);
+      if (!settings || !settings.isEnabled) {
+        return res.status(404).json({ message: "Scheduling not available" });
+      }
+      
+      // Parse dates - they're already in UTC from the client's toISOString()
+      const startDate = new Date(startTime);
+      const endDate = new Date(endTime);
+      
+      // Log timezone information for debugging
+      logger.info('Appointment booking with timezone info', {
+        startTime,
+        endTime,
+        timezone,
+        timezoneOffset,
+        parsedStartUTC: startDate.toISOString(),
+        parsedEndUTC: endDate.toISOString()
+      });
+      
+      // Check for conflicts with existing appointments in database
+      const existingAppointments = await storage.getAppointmentsByDateRange(
+        settings.userId,
+        startDate,
+        endDate
+      );
+      
+      const hasConflict = existingAppointments.some(appt => {
+        const apptStart = new Date(appt.startTime);
+        const apptEnd = new Date(appt.endTime);
+        return (
+          (startDate >= apptStart && startDate < apptEnd) ||
+          (endDate > apptStart && endDate <= apptEnd) ||
+          (startDate <= apptStart && endDate >= apptEnd)
+        );
+      });
+      
+      if (hasConflict) {
+        return res.status(409).json({ message: "Time slot is not available" });
+      }
+
+      // Check Google Calendar for conflicts if sync is enabled
+      const user = await storage.getUserById(settings.userId);
+      if (user && user.calendarSyncEnabled) {
+        try {
+          const { createCalendarProvider } = await import('./calendar-service');
+          const calendarProvider = createCalendarProvider(user);
+          
+          if (calendarProvider) {
+            const isAvailable = await calendarProvider.checkAvailability(startDate, endDate);
+            if (!isAvailable) {
+              return res.status(409).json({ 
+                message: "Time slot conflicts with an existing event in your Google Calendar" 
+              });
+            }
+          }
+        } catch (calendarError) {
+          logger.error("Error checking Google Calendar availability", { error: calendarError });
+          // Don't fail the booking if calendar check fails, just log it
+        }
+      }
+      
+      // Generate cancellation token
+      const cancellationToken = crypto.randomBytes(32).toString('hex');
+      
+      // Create appointment
+      const appointment = await storage.createAppointment({
+        userId: settings.userId,
+        attendeeName,
+        attendeeEmail,
+        attendeeNotes: attendeeNotes || null,
+        additionalEmails: additionalEmails || null,
+        startTime: startDate,
+        endTime: endDate,
+        status: "scheduled",
+        cancellationToken,
+        metadata: {},
+        taskId: null,
+      });
+      
+      // Create a task for the appointment on the user's calendar
+      const task = await storage.createTask({
+        title: `Meeting: ${attendeeName}`,
+        category: "Business",
+        priority: "High",
+        completed: false,
+        scheduledDate: startDate,
+        scheduledEnd: endDate,
+        userId: settings.userId,
+        displayOrder: 0,
+        isFixed: false,
+        isRecurring: false,
+        archived: false,
+        checklistItems: [],
+        timer: null,
+        youtubeUrl: null,
+        notes: attendeeNotes || null,
+        durationMin: Math.round((endDate.getTime() - startDate.getTime()) / 60000),
+        bufferBeforeMin: 5,
+        bufferAfterMin: 5,
+        flexibility: null,
+        dependencyIds: null,
+        startDate: null,
+        projectEndDate: null,
+        completedAt: null,
+        recurringFrequency: null,
+        recurringInterval: null,
+        nextDueDate: null,
+        endDate: null,
+        daysOfWeek: null,
+        dayOfMonth: null,
+        monthOfYear: null,
+        parentTaskId: null,
+        archivedAt: null,
+      });
+      
+      // Update appointment with task ID to link them
+      await db.update(appointments).set({ taskId: task.id }).where(eq(appointments.id, appointment.id));
+      
+      // Create Google Calendar event if sync is enabled
+      if (user && user.calendarSyncEnabled) {
+        (async () => {
+          try {
+            const { createCalendarProvider } = await import('./calendar-service');
+            const calendarProvider = createCalendarProvider(user);
+            
+            if (calendarProvider) {
+              const calendarEventId = await calendarProvider.createEvent({
+                summary: `${settings.meetingTitle || 'Meeting'}: ${attendeeName}`,
+                description: attendeeNotes || `Meeting with ${attendeeName}`,
+                location: settings.meetingDescription || undefined,
+                startTime: startDate,
+                endTime: endDate,
+                attendees: [
+                  { email: attendeeEmail, name: attendeeName },
+                  ...(additionalEmails || []).map(email => ({ email }))
+                ],
+              });
+              
+              // Update appointment with calendar event ID
+              await db.update(appointments)
+                .set({ calendarEventId })
+                .where(eq(appointments.id, appointment.id));
+              
+              // Update last sync timestamp
+              await storage.updateUser(user.id, { lastCalendarSync: new Date() });
+              
+              logger.info("Created Google Calendar event for appointment", { 
+                appointmentId: appointment.id,
+                calendarEventId 
+              });
+            }
+          } catch (calendarError) {
+            logger.error("Error creating Google Calendar event", { error: calendarError });
+            // Don't fail the booking if calendar event creation fails
+          }
+        })();
+      }
+      
+      // Send success response immediately and return to prevent any further code from sending another response
+      res.json({
+        success: true,
+        appointmentId: appointment.id,
+        cancellationToken: appointment.cancellationToken,
+      });
+      
+      // Send email notification if configured (don't await - fire and forget)
+      if (settings.notificationEmail) {
+        (async () => {
+          try {
+            const formattedDate = startDate.toLocaleDateString('en-US', { 
+              weekday: 'long', 
+              year: 'numeric', 
+              month: 'long', 
+              day: 'numeric' 
+            });
+            const formattedTime = startDate.toLocaleTimeString('en-US', { 
+              hour: 'numeric', 
+              minute: '2-digit',
+              hour12: true
+            });
+            
+            await sendEmail({
+              to: settings.notificationEmail,
+              from: process.env.FROM_EMAIL || 'noreply@aichecklist.io',
+              subject: `New Appointment Booked: ${attendeeName}`,
+              html: `
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f9fafb; border-radius: 8px;">
+                  <div style="background-color: #ffffff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                    <h2 style="color: #16a34a; margin-top: 0;">New Appointment Booked</h2>
+                    
+                    <div style="background-color: #f0fdf4; padding: 20px; border-radius: 6px; margin: 20px 0;">
+                      <p style="margin: 8px 0;"><strong>Name:</strong> ${attendeeName}</p>
+                      <p style="margin: 8px 0;"><strong>Email:</strong> ${attendeeEmail}</p>
+                      <p style="margin: 8px 0;"><strong>Date:</strong> ${formattedDate}</p>
+                      <p style="margin: 8px 0;"><strong>Time:</strong> ${formattedTime}</p>
+                      <p style="margin: 8px 0;"><strong>Duration:</strong> ${settings.slotDuration} minutes</p>
+                      ${attendeeNotes ? `<p style="margin: 8px 0;"><strong>Notes:</strong> ${attendeeNotes}</p>` : ''}
+                    </div>
+                    
+                    <p style="color: #6b7280; font-size: 14px; margin-top: 20px;">
+                      This appointment has been automatically added to your AIChecklist calendar.
+                    </p>
+                  </div>
+                  
+                  <p style="text-align: center; color: #9ca3af; font-size: 12px; margin-top: 20px;">
+                    AIChecklist.io - Smart Task Management
+                  </p>
+                </div>
+              `,
+            });
+          } catch (emailError) {
+            // Log email error but don't fail the booking
+            logger.error("Error sending booking notification email", { error: emailError });
+          }
+        })();
+      }
+      
+      // Send calendar invites to additional emails (don't await - fire and forget)
+      if (additionalEmails && Array.isArray(additionalEmails) && additionalEmails.length > 0) {
+        (async () => {
+          try {
+            const formattedDate = startDate.toLocaleDateString('en-US', { 
+              weekday: 'long', 
+              year: 'numeric', 
+              month: 'long', 
+              day: 'numeric' 
+            });
+            const formattedTime = startDate.toLocaleTimeString('en-US', { 
+              hour: 'numeric', 
+              minute: '2-digit',
+              hour12: true
+            });
+            
+            // Send calendar invite to each additional email
+            for (const email of additionalEmails) {
+              try {
+                await sendEmail({
+                  to: email,
+                  from: process.env.FROM_EMAIL || 'noreply@aichecklist.io',
+                  subject: `Calendar Invite: Meeting with ${settings.meetingTitle || 'Host'}`,
+                  html: `
+                    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f9fafb; border-radius: 8px;">
+                      <div style="background-color: #ffffff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                        <h2 style="color: #16a34a; margin-top: 0;">Calendar Invite</h2>
+                        
+                        <p style="margin: 16px 0;">You've been included in an appointment.</p>
+                        
+                        <div style="background-color: #f0fdf4; padding: 20px; border-radius: 6px; margin: 20px 0;">
+                          <p style="margin: 8px 0;"><strong>Meeting:</strong> ${settings.meetingTitle || 'Appointment'}</p>
+                          <p style="margin: 8px 0;"><strong>Attendee:</strong> ${attendeeName}</p>
+                          <p style="margin: 8px 0;"><strong>Date:</strong> ${formattedDate}</p>
+                          <p style="margin: 8px 0;"><strong>Time:</strong> ${formattedTime}</p>
+                          <p style="margin: 8px 0;"><strong>Duration:</strong> ${settings.slotDuration} minutes</p>
+                          ${attendeeNotes ? `<p style="margin: 8px 0;"><strong>Notes:</strong> ${attendeeNotes}</p>` : ''}
+                        </div>
+                        
+                        <p style="color: #6b7280; font-size: 14px; margin-top: 20px;">
+                          Please add this to your calendar and join at the scheduled time.
+                        </p>
+                      </div>
+                      
+                      <p style="text-align: center; color: #9ca3af; font-size: 12px; margin-top: 20px;">
+                        AIChecklist.io - Smart Task Management
+                      </p>
+                    </div>
+                  `,
+                });
+              } catch (singleEmailError) {
+                logger.error(`Error sending calendar invite to ${email}`, { error: singleEmailError });
+              }
+            }
+          } catch (emailError) {
+            logger.error("Error sending calendar invites to additional emails", { error: emailError });
+          }
+        })();
+      }
+      
+      // Early return to prevent the catch block from trying to send a response after success
+      return;
+    } catch (error) {
+      logger.error("Error booking appointment", { error });
+      res.status(500).json({ message: "Failed to book appointment" });
+    }
+  });
+
+  // PUBLIC: Cancel an appointment
+  app.post("/api/public/schedule/:slug/cancel", async (req: Request, res: Response) => {
+    try {
+      const { cancellationToken } = req.body;
+      
+      if (!cancellationToken) {
+        return res.status(400).json({ message: "Cancellation token required" });
+      }
+      
+      const appointment = await storage.getAppointmentByCancellationToken(cancellationToken);
+      if (!appointment) {
+        return res.status(404).json({ message: "Appointment not found" });
+      }
+      
+      // Get user to check if calendar sync is enabled
+      const user = await storage.getUserById(appointment.userId);
+      
+      // Delete Google Calendar event if it exists and sync is enabled
+      if (user && user.calendarSyncEnabled && appointment.calendarEventId) {
+        (async () => {
+          try {
+            const { createCalendarProvider } = await import('./calendar-service');
+            const calendarProvider = createCalendarProvider(user);
+            
+            if (calendarProvider) {
+              await calendarProvider.deleteEvent(appointment.calendarEventId);
+              
+              // Update last sync timestamp
+              await storage.updateUser(user.id, { lastCalendarSync: new Date() });
+              
+              logger.info("Deleted Google Calendar event for cancelled appointment", { 
+                appointmentId: appointment.id,
+                calendarEventId: appointment.calendarEventId 
+              });
+            }
+          } catch (calendarError) {
+            logger.error("Error deleting Google Calendar event", { error: calendarError });
+            // Don't fail the cancellation if calendar event deletion fails
+          }
+        })();
+      }
+      
+      await storage.updateAppointmentStatus(appointment.id, "cancelled");
+      
+      res.json({ success: true, message: "Appointment cancelled" });
+    } catch (error) {
+      logger.error("Error cancelling appointment", { error });
+      res.status(500).json({ message: "Failed to cancel appointment" });
+    }
+  });
+
+  // CALENDAR INTEGRATION ROUTES
+  
+  // Get Google Calendar OAuth URL
+  app.get("/api/calendar/google/auth-url", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { GoogleCalendarProvider } = await import('./calendar-service');
+      const userId = req.user!.id;
+      const authUrl = GoogleCalendarProvider.getAuthUrl(userId.toString());
+      res.json({ authUrl });
+    } catch (error) {
+      logger.error("Error generating Google Calendar auth URL", { error });
+      res.status(500).json({ message: "Failed to generate authorization URL" });
+    }
+  });
+
+  // Google Calendar OAuth callback
+  app.get("/api/calendar/google/callback", async (req: Request, res: Response) => {
+    try {
+      const { code, state } = req.query;
+      
+      if (!code || typeof code !== 'string') {
+        return res.status(400).send("Authorization code missing");
+      }
+      
+      const { GoogleCalendarProvider } = await import('./calendar-service');
+      const tokens = await GoogleCalendarProvider.handleCallback(code);
+      
+      // Update user with calendar tokens
+      const userId = state ? parseInt(state) : null;
+      if (!userId) {
+        return res.status(400).send("Invalid state parameter");
+      }
+      
+      await storage.updateUser(userId, {
+        calendarProvider: 'google',
+        calendarAccessToken: tokens.accessToken,
+        calendarRefreshToken: tokens.refreshToken,
+        calendarTokenExpiry: tokens.expiresAt,
+        calendarSyncEnabled: true,
+        calendarEmail: tokens.email,
+        lastCalendarSync: new Date(),
+      });
+      
+      // Redirect to settings page with success message
+      res.redirect('/settings?calendar=connected');
+    } catch (error) {
+      logger.error("Error handling Google Calendar callback", { error });
+      res.redirect('/settings?calendar=error');
+    }
+  });
+
+  // Disconnect calendar
+  app.post("/api/calendar/disconnect", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const userId = req.user!.id;
+      
+      await storage.updateUser(userId, {
+        calendarProvider: null,
+        calendarAccessToken: null,
+        calendarRefreshToken: null,
+        calendarTokenExpiry: null,
+        calendarSyncEnabled: false,
+        calendarEmail: null,
+      });
+      
+      res.json({ success: true, message: "Calendar disconnected" });
+    } catch (error) {
+      logger.error("Error disconnecting calendar", { error });
+      res.status(500).json({ message: "Failed to disconnect calendar" });
+    }
+  });
+
+  // Get calendar sync status
+  app.get("/api/calendar/status", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const user = req.user!;
+      
+      res.json({
+        connected: !!user.calendarProvider,
+        provider: user.calendarProvider,
+        syncEnabled: user.calendarSyncEnabled,
+        calendarEmail: user.calendarEmail,
+        lastSync: user.lastCalendarSync,
+      });
+    } catch (error) {
+      logger.error("Error getting calendar status", { error });
+      res.status(500).json({ message: "Failed to get calendar status" });
+    }
+  });
+
+  // List available calendars
+  app.get("/api/calendar/list", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { createCalendarProvider } = await import('./calendar-service');
+      const provider = createCalendarProvider(req.user!);
+      
+      if (!provider) {
+        return res.status(400).json({ message: "No calendar connected" });
+      }
+      
+      const calendars = await provider.listCalendars();
+      res.json({ calendars });
+    } catch (error) {
+      logger.error("Error listing calendars", { error });
+      res.status(500).json({ message: "Failed to list calendars" });
+    }
+  });
+
+  // Update calendar selection
+  app.post("/api/calendar/select", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { calendarId } = req.body;
+      const userId = req.user!.id;
+      
+      if (!calendarId) {
+        return res.status(400).json({ message: "Calendar ID required" });
+      }
+      
+      await storage.updateUser(userId, { calendarId });
+      res.json({ success: true, message: "Calendar updated" });
+    } catch (error) {
+      logger.error("Error updating calendar selection", { error });
+      res.status(500).json({ message: "Failed to update calendar" });
+    }
+  });
+
+  // Toggle calendar sync
+  app.post("/api/calendar/toggle-sync", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { enabled } = req.body;
+      const userId = req.user!.id;
+      
+      await storage.updateUser(userId, { calendarSyncEnabled: enabled });
+      res.json({ success: true, enabled });
+    } catch (error) {
+      logger.error("Error toggling calendar sync", { error });
+      res.status(500).json({ message: "Failed to toggle calendar sync" });
+    }
+  });
+
+  // HEAD request for lightweight health pings (load balancers)
+  app.head("/api/health", async (req: Request, res: Response) => {
+    try {
+      await storage.healthCheck();
+      res.status(200).end();
+    } catch {
+      res.status(503).end();
+    }
+  });
+
+  // Report generation with hybrid AI (online/offline support)
+  app.post("/api/reports/generate", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const { reportType, timeframe, includeArchived } = req.body;
+      const userId = req.user!.id;
+
+      if (!reportType) {
+        return res.status(400).json({ message: "Report type is required" });
+      }
+
+      // Gather report data
+      const tasks = await storage.getTasks(userId);
+      const completedTasks = tasks.filter(t => t.completed);
+      const activeTasks = tasks.filter(t => !t.completed && !t.archived);
+      const archivedTasks = tasks.filter(t => t.archived);
+
+      // Filter by timeframe if specified
+      let filteredTasks = tasks;
+      if (timeframe) {
+        const now = new Date();
+        const cutoffDate = new Date();
+        
+        switch (timeframe) {
+          case 'today':
+            cutoffDate.setHours(0, 0, 0, 0);
+            break;
+          case 'week':
+            cutoffDate.setDate(now.getDate() - 7);
+            break;
+          case 'month':
+            cutoffDate.setMonth(now.getMonth() - 1);
+            break;
+          case 'year':
+            cutoffDate.setFullYear(now.getFullYear() - 1);
+            break;
+        }
+
+        filteredTasks = tasks.filter(t => {
+          const taskDate = t.completedAt || t.createdAt;
+          return taskDate && new Date(taskDate) >= cutoffDate;
+        });
+      }
+
+      const reportData = {
+        reportType,
+        timeframe: timeframe || 'all',
+        totalTasks: filteredTasks.length,
+        completedTasks: filteredTasks.filter(t => t.completed).length,
+        activeTasks: filteredTasks.filter(t => !t.completed && !t.archived).length,
+        archivedTasks: includeArchived ? filteredTasks.filter(t => t.archived).length : 0,
+        categories: [...new Set(filteredTasks.map(t => t.category || 'Uncategorized'))],
+        priorities: {
+          high: filteredTasks.filter(t => t.priority === 'High').length,
+          medium: filteredTasks.filter(t => t.priority === 'Medium').length,
+          low: filteredTasks.filter(t => t.priority === 'Low').length,
+        },
+        tasks: filteredTasks.map(t => ({
+          title: t.title,
+          category: t.category,
+          priority: t.priority,
+          completed: t.completed,
+          completedAt: t.completedAt,
+          createdAt: t.createdAt,
+          timerDuration: t.timerDuration,
+        }))
+      };
+
+      // Use hybrid AI to generate the report (will auto-fallback to Gemini if OpenAI fails)
+      const { hybridAI } = await import('./hybrid-ai-provider');
+      const result = await hybridAI.generateReport(reportType, reportData);
+
+      res.json({
+        success: true,
+        report: result.content,
+        provider: result.provider,
+        metadata: {
+          reportType,
+          timeframe: timeframe || 'all',
+          generatedAt: new Date().toISOString(),
+          totalTasks: reportData.totalTasks,
+          completedTasks: reportData.completedTasks,
+        }
+      });
+
+    } catch (error) {
+      logger.error("Error generating report", { error });
+      
+      // If cloud AI fails completely, suggest offline mode to client
+      if (error instanceof Error && error.message.includes('All cloud AI providers failed')) {
+        res.status(503).json({ 
+          message: "Cloud AI unavailable. Please try offline mode.", 
+          useOfflineMode: true 
+        });
+      } else {
+        res.status(500).json({ message: "Failed to generate report" });
+      }
+    }
+  });
+
+  const httpServer = createServer(app);
+  
+  // Start scheduled jobs
+  taskScheduler.startAllJobs();
+  
+  // Setup SEO routes (sitemap, robots.txt, etc.)
+  setupSEORoutes(app);
+  
+  // Set up WebSocket server for real-time updates
+  const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
+  
+  wss.on('connection', (ws) => {
+    logger.info('WebSocket client connected');
+    
+    ws.on('message', (message) => {
+      try {
+        const data = JSON.parse(message.toString());
+        logger.debug('WebSocket message received', { type: data.type });
+        
+        // Handle different message types
+        if (data.type === 'subscribe') {
+          ws.send(JSON.stringify({ type: 'subscribed', channel: data.channel }));
+        }
+      } catch (error) {
+        logger.error('Error processing WebSocket message', { error });
+      }
+    });
+    
+    ws.on('close', () => {
+      logger.info('WebSocket client disconnected');
+    });
+  });
+  
+  return httpServer;
+}

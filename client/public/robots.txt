@@ -1,0 +1,66 @@
+# AIChecklist.io Robots.txt
+# https://aichecklist.io
+
+User-agent: *
+Allow: /
+
+# Sitemap location
+Sitemap: https://aichecklist.io/sitemap.xml
+
+# Crawl-delay for respectful crawling
+Crawl-delay: 1
+
+# Disallow admin and private areas
+Disallow: /admin
+Disallow: /admin/*
+Disallow: /api/
+Disallow: /api/*
+
+# Disallow user-specific pages that require authentication
+Disallow: /settings
+Disallow: /settings/*
+
+# Allow search engines to crawl important pages
+Allow: /
+Allow: /auth
+Allow: /calendar
+Allow: /templates
+Allow: /help
+Allow: /achievements
+Allow: /reports
+Allow: /statistics
+Allow: /gantt
+Allow: /pert
+Allow: /projects
+Allow: /subscription
+Allow: /schedule
+Allow: /feedback
+
+# Block common crawler traps
+Disallow: /*?*
+Disallow: /*.json$
+Disallow: /*.xml$
+
+# Allow sitemap access
+Allow: /sitemap.xml
+Allow: /robots.txt
+
+# Google specific
+User-agent: Googlebot
+Allow: /
+Crawl-delay: 0
+
+# Bing specific  
+User-agent: Bingbot
+Allow: /
+Crawl-delay: 1
+
+# Block bad bots
+User-agent: AhrefsBot
+Disallow: /
+
+User-agent: SemrushBot
+Disallow: /
+
+User-agent: MJ12bot
+Disallow: /

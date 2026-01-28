@@ -1,0 +1,564 @@
+/* Custom style modules removed - were causing rendering conflicts */
+
+@import './styles/accessibility.css';
+@import './styles/tablet.css';
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Lightweight CSS animations to replace framer-motion */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.8); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-in-out;
+}
+
+.animate-scale-in {
+  animation: scaleIn 0.2s ease-out;
+}
+
+/* Subtle shimmer glow animation for featured buttons */
+@keyframes subtleShimmer {
+  0% {
+    background-position: -200% center;
+  }
+  100% {
+    background-position: 200% center;
+  }
+}
+
+@keyframes subtleGlow {
+  0%, 100% {
+    box-shadow: 0 0 8px rgba(99, 102, 241, 0.4), 0 0 15px rgba(99, 102, 241, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 15px rgba(99, 102, 241, 0.6), 0 0 25px rgba(99, 102, 241, 0.35), 0 0 40px rgba(99, 102, 241, 0.15);
+  }
+}
+
+/* Green swoosh animation for demo button */
+@keyframes greenSwoosh {
+  0% {
+    transform: translateX(-100%) skewX(-15deg);
+  }
+  100% {
+    transform: translateX(200%) skewX(-15deg);
+  }
+}
+
+.animate-green-swoosh {
+  position: relative;
+  overflow: hidden;
+}
+
+.animate-green-swoosh::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 50%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(34, 197, 94, 0.4), rgba(34, 197, 94, 0.6), rgba(34, 197, 94, 0.4), transparent);
+  transform: translateX(-100%) skewX(-15deg);
+  animation: greenSwoosh 2.5s ease-in-out infinite;
+}
+
+.animate-subtle-shimmer {
+  position: relative;
+  overflow: hidden;
+  animation: subtleGlow 2.5s ease-in-out infinite;
+}
+
+.animate-subtle-shimmer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.35) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: subtleShimmer 2.5s ease-in-out infinite;
+  pointer-events: none;
+}
+
+/* Print Calendar Styles */
+@media print {
+  /* Hide everything except print-only elements */
+  body * {
+    visibility: hidden;
+  }
+  
+  .print-only, .print-only * {
+    visibility: visible;
+  }
+  
+  .print-only {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 15px !important;
+    background: white !important;
+    color: black !important;
+    font-family: Arial, sans-serif !important;
+    font-size: 12px !important;
+    line-height: 1.4 !important;
+  }
+  
+  /* Ensure calendar grid prints properly */
+  .print-calendar-grid {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+  
+  /* Hide screen-only elements */
+  .no-print {
+    display: none !important;
+  }
+  
+  /* Optimize page layout */
+  @page {
+    margin: 0.5in;
+    size: landscape; /* Better for calendar view */
+  }
+  
+  /* Ensure black borders print properly */
+  .print-only * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+}
+
+/* Browser-specific compatibility fixes */
+* {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Remove unwanted blue focus outlines */
+*:focus {
+  outline: none !important;
+}
+
+/* Add better focus styles only where needed */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid hsl(var(--primary)) !important;
+  outline-offset: 2px !important;
+}
+
+/* DomoAI input should have no focus styling */
+.domoai-input:focus-visible {
+  outline: none !important;
+}
+
+/* Hide scrollbars but keep functionality */
+.scrollbar-none {
+  -ms-overflow-style: none;  /* Internet Explorer 10+ */
+  scrollbar-width: none;  /* Firefox */
+}
+
+.scrollbar-none::-webkit-scrollbar {
+  display: none;  /* Safari and Chrome */
+}
+
+/* Smooth scrolling for all scrollable elements */
+.scrollbar-none {
+  scroll-behavior: smooth;
+}
+
+/* Light wave animation for text */
+.light-wave-text {
+  position: relative;
+  text-shadow: 0 0 8px rgba(34, 197, 94, 0.3);
+}
+
+.light-wave-text::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, 
+    transparent 0%, 
+    rgba(34, 197, 94, 0.4) 25%, 
+    rgba(34, 197, 94, 0.8) 50%, 
+    rgba(34, 197, 94, 0.4) 75%, 
+    transparent 100%
+  );
+  animation: lightWave 3s ease-in-out infinite;
+  z-index: 1;
+  pointer-events: none;
+}
+
+@keyframes lightWave {
+  0% { 
+    left: -100%; 
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  50% { 
+    left: 100%; 
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% { 
+    left: 100%; 
+    opacity: 0;
+  }
+}
+
+/* Opera and Brave specific fixes */
+input[type="text"],
+input[type="email"],
+input[type="password"],
+textarea {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+/* Fix for WebKit browsers (Brave, Opera) */
+button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 142 76% 36%;
+    --primary-foreground: 355.7 100% 97.3%;
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222.2 84% 4.9%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96%;
+    --accent-foreground: 222.2 84% 4.9%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 142 76% 36%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 142 76% 36%;
+    --primary-foreground: 222.2 84% 4.9%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 142 76% 36%;
+  }
+
+  .purple-gold {
+    --background: 270 30% 2%;
+    --foreground: 51 80% 70%;
+    --card: 270 30% 4%;
+    --card-foreground: 51 80% 70%;
+    --popover: 270 30% 2%;
+    --popover-foreground: 51 80% 70%;
+    --primary: 51 100% 50%;
+    --primary-foreground: 270 30% 2%;
+    --secondary: 270 30% 8%;
+    --secondary-foreground: 51 80% 70%;
+    --muted: 270 30% 8%;
+    --muted-foreground: 51 40% 50%;
+    --accent: 270 30% 12%;
+    --accent-foreground: 51 80% 70%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 51 80% 70%;
+    --border: 270 30% 12%;
+    --input: 270 30% 8%;
+    --ring: 51 100% 50%;
+  }
+
+  .white-red {
+    --background: 0 0% 100%;
+    --foreground: 0 84% 30%;
+    --card: 0 0% 98%;
+    --card-foreground: 0 84% 30%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 84% 30%;
+    --primary: 0 84% 60%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 0 0% 95%;
+    --secondary-foreground: 0 84% 30%;
+    --muted: 0 0% 95%;
+    --muted-foreground: 0 50% 40%;
+    --accent: 0 0% 92%;
+    --accent-foreground: 0 84% 30%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 90%;
+    --input: 0 0% 95%;
+    --ring: 0 84% 60%;
+  }
+
+  .orange-white {
+    --background: 0 0% 100%;
+    --foreground: 25 95% 35%;
+    --card: 0 0% 98%;
+    --card-foreground: 25 95% 35%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 25 95% 35%;
+    --primary: 25 95% 53%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 0 0% 95%;
+    --secondary-foreground: 25 95% 35%;
+    --muted: 0 0% 95%;
+    --muted-foreground: 25 50% 40%;
+    --accent: 0 0% 92%;
+    --accent-foreground: 25 95% 35%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 90%;
+    --input: 0 0% 95%;
+    --ring: 25 95% 53%;
+  }
+
+  .psychedelic {
+    --background: 261 15% 8%;
+    --foreground: 280 100% 95%;
+    --card: 261 15% 12%;
+    --card-foreground: 280 100% 95%;
+    --popover: 261 15% 8%;
+    --popover-foreground: 280 100% 95%;
+    --primary: 271 91% 65%;
+    --primary-foreground: 261 15% 8%;
+    --secondary: 240 21% 15%;
+    --secondary-foreground: 280 100% 95%;
+    --muted: 240 21% 15%;
+    --muted-foreground: 262 83% 58%;
+    --accent: 240 100% 70%;
+    --accent-foreground: 261 15% 8%;
+    --destructive: 348 83% 47%;
+    --destructive-foreground: 280 100% 95%;
+    --border: 240 21% 20%;
+    --input: 240 21% 20%;
+    --ring: 271 91% 65%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply font-sans antialiased bg-background text-foreground transition-colors duration-300;
+  }
+
+  /* Add smooth transitions for theme changes */
+  .light *, .dark *, .psychedelic * {
+    @apply transition-colors duration-200;
+  }
+  
+  /* Theme toggle button animation */
+  .theme-toggle-icon {
+    @apply transform transition-transform duration-300;
+  }
+  
+  .theme-toggle-icon:hover {
+    @apply rotate-12;
+  }
+}
+
+@layer utilities {
+  /* Custom animation for checkbox */
+  @keyframes pulse {
+    0% {
+      box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+    }
+    70% {
+      box-shadow: 0 0 0 10px rgba(16, 185, 129, 0);
+    }
+    100% {
+      box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+    }
+  }
+
+  .animate-pulse {
+    animation: pulse 1s cubic-bezier(0.4, 0, 0.6, 1) 1;
+  }
+
+  /* Animation for task entrance */
+  @keyframes slide-in {
+    0% {
+      opacity: 0;
+      transform: translateY(20px);
+    }
+    100% {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .animate-slide-in {
+    animation: slide-in 0.3s ease-out;
+  }
+}
+
+/* Removed auth-container visibility fix - no longer needed */
+
+/* Print Styles */
+@media screen {
+  .print-only {
+    display: none !important;
+  }
+}
+
+@media print {
+  /* Hide all screen content */
+  .no-print {
+    display: none !important;
+  }
+  
+  /* Hide everything else */
+  * {
+    visibility: hidden !important;
+  }
+  
+  /* Show print content */
+  .print-only,
+  .print-only * {
+    visibility: visible !important;
+  }
+  
+  /* Position print content */
+  .print-only {
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    width: 100% !important;
+    background: white !important;
+    color: black !important;
+    font-family: Arial, sans-serif !important;
+    padding: 20px !important;
+    text-align: left !important;
+  }
+  
+
+
+  /* Page settings - Force landscape orientation for calendar printing */
+  @page {
+    size: letter landscape;
+    margin: 0.4in 0.3in;
+    /* Remove default browser headers and footers */
+    margin-top: 0.4in;
+    margin-bottom: 0.4in;
+  }
+  
+  /* Remove browser's default date/time header */
+  html {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  
+  /* Calendar-specific print optimizations for manual fill-in */
+  .print-only {
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 10px !important;
+  }
+  
+  /* Enhanced calendar grid for landscape printing */
+  .print-only div[style*="grid-template-columns"] {
+    gap: 2px !important;
+    page-break-inside: avoid !important;
+  }
+  
+  /* Calendar day cells - optimized for manual writing */
+  .print-only div[style*="minHeight: '120px'"] {
+    min-height: 140px !important;
+    padding: 6px !important;
+    border: 1px solid #333 !important;
+    box-sizing: border-box !important;
+  }
+  
+  /* Calendar header styling */
+  .print-only h1 {
+    font-size: 20px !important;
+    margin: 0 0 15px 0 !important;
+    text-align: center !important;
+    font-weight: bold !important;
+  }
+  
+  /* Legend and task summary optimization */
+  .print-only div[style*="justifyContent: 'center'"] {
+    margin: 15px 0 !important;
+    font-size: 11px !important;
+  }
+  
+  /* Task list optimization for landscape */
+  .print-only div[style*="lineHeight: '1.4'"] {
+    font-size: 10px !important;
+    line-height: 1.3 !important;
+  }
+  
+  /* Ensure proper page breaks */
+  .print-only {
+    page-break-before: auto !important;
+    page-break-after: auto !important;
+    page-break-inside: avoid !important;
+  }
+}
+
+/* Superhuman Mode (ADHD) Animations */
+.superhuman-on {
+  animation: shPulse 1s ease-out 1;
+}
+
+@keyframes shPulse {
+  0%   { box-shadow: 0 0 0 rgba(0,0,0,0); }
+  30%  { box-shadow: 0 0 22px rgba(59,130,246,0.35), inset 0 0 10px rgba(59,130,246,0.1); }
+  100% { box-shadow: 0 0 0 rgba(0,0,0,0); }
+}
+
+.superhuman-off {
+  animation: shFade 1s ease-out 1;
+}
+
+@keyframes shFade {
+  0%   { box-shadow: 0 0 18px rgba(148,163,184,0.35); }
+  100% { box-shadow: 0 0 0 rgba(0,0,0,0); }
+}

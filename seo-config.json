@@ -1,0 +1,69 @@
+{
+  "seo": {
+    "site": {
+      "name": "AIChecklist.io",
+      "url": "https://aichecklist.io",
+      "description": "AI-powered task management platform with 121+ professional templates, AIDOMO assistant, voice authentication, and smart calendar integration. Boost productivity with intelligent checklists.",
+      "keywords": ["AI checklist", "task management", "productivity", "AIDOMO", "voice authentication", "project templates", "team collaboration"],
+      "logo": "https://aichecklist.io/logo.png",
+      "favicon": "/logo.png",
+      "language": "en",
+      "region": "US"
+    },
+    "organization": {
+      "name": "AIChecklist.io",
+      "type": "Organization",
+      "url": "https://aichecklist.io",
+      "logo": "https://aichecklist.io/logo.png",
+      "description": "AI-powered task management platform with professional templates and AIDOMO assistant",
+      "sameAs": [
+        "https://twitter.com/aichecklist",
+        "https://linkedin.com/company/aichecklist"
+      ],
+      "contactPoint": {
+        "contactType": "customer service",
+        "email": "support@aichecklist.io"
+      }
+    },
+    "analytics": {
+      "googleAnalytics": "G-XXXXXXXXXX",
+      "googleSearchConsole": "google-site-verification=XXXXXXXXXX",
+      "microsoftClarity": "XXXXXXXXXX"
+    },
+    "socialMedia": {
+      "twitter": "@aichecklist",
+      "linkedin": "company/aichecklist",
+      "facebook": "aichecklist.io"
+    },
+    "pages": {
+      "home": {
+        "title": "AIChecklist.io - AI-Powered Task Management & Professional Templates",
+        "description": "AI-powered task management platform with 121+ professional templates, AIDOMO assistant, voice authentication, and smart calendar integration. Boost productivity with intelligent checklists.",
+        "keywords": ["AI checklist", "task management", "productivity", "AIDOMO", "voice authentication"],
+        "canonical": "https://aichecklist.io/",
+        "ogImage": "https://aichecklist.io/logo.png"
+      },
+      "templates": {
+        "title": "121+ Professional Checklist Templates - AIChecklist.io",
+        "description": "Access 121+ professional checklist templates for business, startups, healthcare, education, and more. AI-powered templates with smart task management.",
+        "keywords": ["checklist templates", "business checklists", "startup templates", "project templates"],
+        "canonical": "https://aichecklist.io/templates",
+        "ogImage": "https://aichecklist.io/templates-preview.png"
+      },
+      "features": {
+        "title": "AI Features & AIDOMO Assistant - AIChecklist.io",
+        "description": "Discover AI-powered features including AIDOMO assistant, voice authentication, smart calendar integration, and intelligent task suggestions.",
+        "keywords": ["AI features", "AIDOMO assistant", "voice authentication", "smart calendar"],
+        "canonical": "https://aichecklist.io/features",
+        "ogImage": "https://aichecklist.io/features-preview.png"
+      },
+      "pricing": {
+        "title": "Pricing Plans - AIChecklist.io",
+        "description": "Choose the perfect plan for your productivity needs. Free and premium options with advanced AI features and unlimited templates.",
+        "keywords": ["pricing", "plans", "subscription", "free trial"],
+        "canonical": "https://aichecklist.io/pricing",
+        "ogImage": "https://aichecklist.io/pricing-preview.png"
+      }
+    }
+  }
+}

@@ -1,0 +1,34 @@
+================================================================================
+                         SITE BANNERS & NOTICES
+================================================================================
+
+--------------------------------------------------------------------------------
+MAINTENANCE BANNER
+--------------------------------------------------------------------------------
+Thank you for your patience. The site is currently under maintenance.
+
+--------------------------------------------------------------------------------
+FESTIVE HOLIDAY BANNER
+--------------------------------------------------------------------------------
+Theme: Happy Holidays
+Colors: Blue background with gold and silver accents, green elements
+
+Layout:
+- Left side: Green fir Christmas tree with gold ornaments
+- Right side: Blue and gold Menorah (Hanukkah)
+- Center: "Happy Holidays" text in gold lettering
+- Top border: Silver and gold bells hanging across
+- Decorative wreaths with red bows hanging along the banner
+- Subtle snowflake accents throughout
+
+Design Elements:
+- Silver bells: Shimmering metallic finish
+- Gold bells: Warm golden glow
+- Fir tree: Deep green with gold star topper
+- Menorah: Traditional 9-branch design in blue and gold
+- Wreaths: Evergreen with red ribbon bows
+- Background: Rich blue gradient
+
+Message: Happy Holidays!
+
+================================================================================
